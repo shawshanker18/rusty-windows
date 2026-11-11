@@ -801,7 +801,6 @@ fn pc_name() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 reg_switch!(dynamic_lock, set_dynamic_lock, "Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "EnableGoodbye", on = 1, off = 0, missing = false);
-reg_switch!(lock_privacy, set_lock_privacy, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "DisableAutomaticRestartSignOn", on = 0, off = 1, missing = true);
 
 // Storage
 reg_switch!(storage_sense, set_storage_sense, "Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy", "01", on = 1, off = 0, missing = false);
@@ -1664,7 +1663,6 @@ fn pages() -> Vec<Page> {
             r(0xE192, "Ways to sign in: face, fingerprint, PIN, security key, password", "Changing them needs Windows' own page, which asks you to confirm who you are", Link("ms-settings:signinoptions")),
             r(0, "Additional settings", "", Header),
             r(0xE72E, "Dynamic lock", "Automatically lock your device when you're away, using a paired phone", Toggle(dynamic_lock, set_dynamic_lock)),
-            r(0xE72E, "Use my sign-in info to automatically finish setting up after an update", "", Toggle(lock_privacy, set_lock_privacy)),
         ]),
         sub("Devices", "Bluetooth & devices", vec![
             r(0, "Bluetooth devices", "", Header),
