@@ -301,64 +301,17 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let dc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
-            let bg = CreateSolidBrush(COLORREF(0x2C2C2C));
-            FillRect(dc, &rc, bg);
-            let _ = DeleteObject(bg.into());
-            SetBkMode(dc, TRANSPARENT);
-            let font = |px: f32, weight: i32| CreateFontW(-(px * s) as i32, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
-            let (title, body) = (font(14.0, 600), font(13.0, 400));
-            let old = SelectObject(dc, title.into());
-            SetTextColor(dc, COLORREF(0xFFFFFF));
-            let mut tr = RECT { left: (PAD * s) as i32 + 4, top: 0, right: rc.right, bottom: (HEAD * s) as i32 };
-            let mut head: Vec<u16> = "Clipboard".encode_utf16().collect();
-            DrawTextW(dc, &mut head, &mut tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-            SelectObject(dc, body.into());
-            let st = ST.lock().unwrap();
-            let pen = SelectObject(dc, GetStockObject(NULL_PEN));
-            if st.items.is_empty() {
-                let msg = if !st.loaded { "Loading\u{2026}" } else if st.off { "Clipboard history is off. Click here to turn it on in Settings." } else { "Nothing here yet. Copy some text and it will show up." };
-                SetTextColor(dc, COLORREF(0xC5C5C5));
-                let mut r = RECT { left: (PAD * s) as i32 + 4, top: (HEAD * s) as i32, right: rc.right - (PAD * s) as i32, bottom: ((HEAD + ROW) * s) as i32 };
-                let mut t: Vec<u16> = msg.encode_utf16().collect();
-                DrawTextW(dc, &mut t, &mut r, DT_WORDBREAK | DT_NOPREFIX);
+            // Direct2D into a buffer that keeps alpha: Windows' blurred panel material shows through
+            use windows::Win32::UI::Controls::{BeginBufferedPaint, EndBufferedPaint, BPBF_TOPDOWNDIB, BPPF_ERASE, BP_PAINTPARAMS};
+            let params = BP_PAINTPARAMS { cbSize: size_of::<BP_PAINTPARAMS>() as u32, dwFlags: BPPF_ERASE, ..Default::default() };
+            let mut mem = HDC::default();
+            let pb = BeginBufferedPaint(dc, &rc, BPBF_TOPDOWNDIB, Some(&params), &mut mem);
+            if !mem.is_invalid() {
+                let st = ST.lock().unwrap();
+                let _ = draw(mem, &rc, s, &st);
+                drop(st);
+                let _ = EndBufferedPaint(pb, true);
             }
-            if !st.items.is_empty() {
-                SetTextColor(dc, COLORREF(if st.hover_clear { 0xFFFFFF } else { 0xC5C5C5 }));
-                let c = clear_rect();
-                let mut r = RECT { left: (c.0 * s) as i32, top: (c.1 * s) as i32, right: (c.2 * s) as i32, bottom: (c.3 * s) as i32 };
-                let mut t: Vec<u16> = "Clear all".encode_utf16().collect();
-                DrawTextW(dc, &mut t, &mut r, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
-            }
-            for (i, (_, text)) in st.items.iter().enumerate().skip(st.top).take(MAX_ROWS) {
-                let y = HEAD + (i - st.top) as f32 * (ROW + GAP);
-                // colours are 0x00BBGGRR
-                let brush = CreateSolidBrush(COLORREF(if st.hover == Some(i) { 0x454545 } else { 0x383838 }));
-                let ob = SelectObject(dc, brush.into());
-                let _ = RoundRect(dc, (PAD * s) as i32, (y * s) as i32, rc.right - (PAD * s) as i32, ((y + ROW) * s) as i32, (8.0 * s) as i32, (8.0 * s) as i32);
-                SelectObject(dc, ob);
-                let _ = DeleteObject(brush.into());
-                if i == st.sel {
-                    let accent = CreateSolidBrush(COLORREF(0xFFC24C));
-                    let bar = RECT { left: (PAD * s) as i32, top: ((y + 18.0) * s) as i32, right: ((PAD + 3.0) * s) as i32, bottom: ((y + ROW - 18.0) * s) as i32 };
-                    FillRect(dc, &bar, accent);
-                    let _ = DeleteObject(accent.into());
-                }
-                SetTextColor(dc, COLORREF(0xFFFFFF));
-                let mut r = RECT { left: ((PAD + 12.0) * s) as i32, top: ((y + 10.0) * s) as i32, right: rc.right - ((PAD + 40.0) * s) as i32, bottom: ((y + ROW - 10.0) * s) as i32 };
-                let mut t: Vec<u16> = preview(text, 110).encode_utf16().collect();
-                DrawTextW(dc, &mut t, &mut r, DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
-                if st.hover == Some(i) {
-                    // delete this item (the cross lights up under the mouse)
-                    SetTextColor(dc, COLORREF(if st.hover_x { 0xFFFFFF } else { 0x9A9A9A }));
-                    let mut xr = RECT { left: rc.right - ((PAD + 34.0) * s) as i32, top: (y * s) as i32, right: rc.right - ((PAD + 6.0) * s) as i32, bottom: ((y + ROW) * s) as i32 };
-                    let mut cross: Vec<u16> = "\u{2715}".encode_utf16().collect();
-                    DrawTextW(dc, &mut cross, &mut xr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-                }
-            }
-            SelectObject(dc, pen);
-            SelectObject(dc, old);
-            let _ = DeleteObject(title.into());
-            let _ = DeleteObject(body.into());
             let _ = EndPaint(hwnd, &ps);
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
@@ -401,8 +354,63 @@ pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let (dark, round) = (1u32, 2u32);
     let _ = DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
     let _ = DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const c_void, 4);
+    let _ = crate::fluent_window(h); // Windows' blurred panel material
     CLIP.store(h.0 as isize, Relaxed);
     Ok(())
+}
+
+/// The panel, drawn with Direct2D: title, Clear all, then one card per history item.
+unsafe fn draw(dc: HDC, rc: &RECT, s: f32, st: &State) -> windows::core::Result<()> {
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use crate::flyout::{rect, rrect, utf16};
+    use crate::quick::rgb;
+    let f: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+    let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, ..Default::default() };
+    let rt = f.CreateDCRenderTarget(&props)?;
+    rt.BindDC(dc, rc)?;
+    rt.SetDpi(96.0 * s, 96.0 * s);
+    let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let font = |px: f32, weight: DWRITE_FONT_WEIGHT| dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, w!(""));
+    let (title, body) = (font(14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?, font(13.0, DWRITE_FONT_WEIGHT_NORMAL)?);
+    title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+    let w = rc.right as f32 / s;
+    let b = |c: u32| rt.CreateSolidColorBrush(&rgb(c), None);
+    let txt = |t: &str, fmt: &IDWriteTextFormat, r: windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F, c: u32| -> windows::core::Result<()> {
+        rt.DrawText(&utf16(t), fmt, &r, &b(c)?, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        Ok(())
+    };
+    rt.BeginDraw();
+    rt.Clear(Some(&crate::flyout::base(rgb(0x2C2C2C))));
+    txt("Clipboard", &title, rect(PAD + 4.0, 0.0, w, HEAD), 0xFFFFFF)?;
+    if st.items.is_empty() {
+        let msg = if !st.loaded { "Loading\u{2026}" } else if st.off { "Clipboard history is off. Click here to turn it on in Settings." } else { "Nothing here yet. Copy some text and it will show up." };
+        txt(msg, &body, rect(PAD + 4.0, HEAD, w - PAD, HEAD + ROW), 0xC5C5C5)?;
+    } else {
+        let c = clear_rect();
+        let right = font(13.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+        right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+        right.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        txt("Clear all", &right, rect(c.0, c.1, c.2, c.3), if st.hover_clear { 0xFFFFFF } else { 0xC5C5C5 })?;
+    }
+    for (i, (_, text)) in st.items.iter().enumerate().skip(st.top).take(MAX_ROWS) {
+        let y = HEAD + (i - st.top) as f32 * (ROW + GAP);
+        let card = rect(PAD, y, w - PAD, y + ROW);
+        rt.FillRoundedRectangle(&rrect(card, 4.0), &b(if st.hover == Some(i) { 0x454545 } else { 0x383838 })?);
+        if i == st.sel {
+            rt.FillRoundedRectangle(&rrect(rect(PAD, y + 18.0, PAD + 3.0, y + ROW - 18.0), 1.5), &b(0x4CC2FF)?);
+        }
+        txt(&preview(text, 110), &body, rect(PAD + 12.0, y + 10.0, w - PAD - 40.0, y + ROW - 10.0), 0xFFFFFF)?;
+        if st.hover == Some(i) {
+            let x = font(12.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+            x.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            x.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            txt("\u{2715}", &x, rect(w - PAD - 34.0, y, w - PAD - 6.0, y + ROW), if st.hover_x { 0xFFFFFF } else { 0x9A9A9A })?;
+        }
+    }
+    rt.EndDraw(None, None)
 }
 
 #[cfg(test)]
