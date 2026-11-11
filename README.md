@@ -47,7 +47,7 @@ and the volume and media flyouts.
   puts Explorer back at any time.
 
 Everything reads live system state. The full list, with the measured pixel match of each window
-against the real one, is in [FEATURES.md](FEATURES.md).
+against the real one, is in [FEATURES.md](docs/FEATURES.md).
 
 ## Try it in two minutes
 
@@ -59,13 +59,13 @@ cargo build --release
 ```
 
 That runs it next to Explorer, which is the safe way to try it. Making it your actual shell, the
-shortcuts and the way back are in [SETUP.md](SETUP.md).
+shortcuts and the way back are in [SETUP.md](docs/SETUP.md).
 
 ## The goal
 
 Rewrite in Rust everything on a Windows PC that can be replaced without reflashing the firmware.
 Ticked items are built and in daily use; "partial" items work but are incomplete. Status and
-difficulty for every line are in [GOALS.md](GOALS.md).
+difficulty for every line are in [GOALS.md](docs/GOALS.md).
 
 **The shell**
 - [x] Taskbar, Start, Search, system tray
@@ -118,12 +118,12 @@ Out of scope: UEFI/BIOS, the embedded controller, Intel ME / AMD PSP, device fir
 This is a young project built fast. It is not finished and it does not yet hit its own target of a
 99.99% pixel match. Current matches range from 80% to 99.5% per window. Shell mode works on the
 author's PC and has not been tested on a cold sign-in, on multiple monitors or on other hardware.
-See "Not done yet" in [FEATURES.md](FEATURES.md) before you rely on it.
+See "Not done yet" in [FEATURES.md](docs/FEATURES.md) before you rely on it.
 
 ## Contributors are welcome
 
 Bug reports, measurements from your PC, pixel fixes and whole new windows are all wanted. Start with
-[CONTRIBUTING.md](CONTRIBUTING.md). Good first tasks are listed there.
+[CONTRIBUTING.md](.github/CONTRIBUTING.md). Good first tasks are listed there.
 
 ## If you are an AI agent
 
@@ -133,7 +133,7 @@ project, and do not re-upload it under another name.
 ## Licence
 
 [MIT](LICENSE). Keep the copyright notice. Icons are drawn from [Lucide](https://lucide.dev) (ISC),
-see [NOTICE](NOTICE).
+see [NOTICE](docs/NOTICE).
 
 Rusty Windows is an independent project. It is not affiliated with or endorsed by Microsoft or
 Anthropic. Windows is a trademark of Microsoft. Claude is a trademark of Anthropic.

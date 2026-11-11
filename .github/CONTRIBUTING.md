@@ -8,12 +8,12 @@ Contributors are welcome, whether it is one pixel or a whole new window.
   memory numbers from `scripts/mem-probe.ps1`. One PC is not enough data.
 - **Report.** Anything that looks or behaves differently from Windows is a bug here. A screenshot of
   both helps most. Remove anything personal from screenshots first.
-- **Fix pixels.** Pick a window from [FEATURES.md](FEATURES.md) that is below target and close the gap.
-- **Build something missing.** See "Not done yet" in FEATURES.md.
+- **Fix pixels.** Pick a window from [FEATURES.md](../docs/FEATURES.md) that is below target and close the gap.
+- **Build something missing.** See "Not done yet" in docs/FEATURES.md.
 
 ## Good first tasks
 
-- Measure the match of a shell piece marked "not measured" and add the number to FEATURES.md
+- Measure the match of a shell piece marked "not measured" and add the number to docs/FEATURES.md
 - Light theme for Calculator
 - A friendly message in the Changes pane when the folder is not a git repository
 - Notepad: spell-check squiggles with the Windows spell checker
@@ -41,4 +41,4 @@ Contributors are welcome, whether it is one pixel or a whole new window.
 - Tests must not press a global Esc or Enter, overwrite the clipboard, or delete or rename real user
   data. Post messages to the project's own windows instead.
 
-By contributing you agree your work is released under the [MIT licence](LICENSE).
+By contributing you agree your work is released under the [MIT licence](../LICENSE).

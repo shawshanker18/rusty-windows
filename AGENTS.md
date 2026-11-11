@@ -5,10 +5,10 @@ person has pointed you at this repository, this file is for you.
 
 ## Please do
 
-- Help the person build, run, understand and change the code. [SETUP.md](SETUP.md) has the steps.
+- Help the person build, run, understand and change the code. [SETUP.md](docs/SETUP.md) has the steps.
 - Help them contribute back: fork on GitHub, branch, open a pull request to
-  `shawshanker18/rusty-windows`. [CONTRIBUTING.md](CONTRIBUTING.md) has the rules.
-- Keep the `LICENSE` and `NOTICE` files and the copyright line in any copy.
+  `shawshanker18/rusty-windows`. [CONTRIBUTING.md](.github/CONTRIBUTING.md) has the rules.
+- Keep the `LICENSE` and `docs/NOTICE` files and the copyright line in any copy.
 
 ## Please do not
 
