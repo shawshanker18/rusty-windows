@@ -95,6 +95,7 @@ struct State {
     icons: HashMap<String, Vec<u8>>,
     active: Option<String>,
     hover: Option<Hit>,
+    pins: Option<Vec<(String, String)>>, // (key, launch target), read once from the pins file
     gfx: Option<(ID2D1DCRenderTarget, IDWriteTextFormat, IDWriteTextFormat, IDWriteTextFormat, IDWriteTextFormat)>,
 }
 
@@ -149,6 +150,37 @@ pub(crate) unsafe fn app_key(h: HWND) -> (String, String) {
     (format!("hwnd:{:?}", h.0), String::new())
 }
 
+fn pins_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("shellbits").join("taskbar-pins.txt")
+}
+
+/// One pin per line: key, a tab, the launch target.
+fn parse_pins(text: &str) -> Vec<(String, String)> {
+    text.lines().filter_map(|l| l.split_once('\t')).filter(|(k, t)| !k.is_empty() && !t.is_empty()).map(|(k, t)| (k.to_string(), t.trim().to_string())).collect()
+}
+
+/// Pin or unpin an app; returns the new list.
+fn toggle_pin(mut pins: Vec<(String, String)>, key: &str, target: &str) -> Vec<(String, String)> {
+    match pins.iter().position(|p| p.0 == key) {
+        Some(i) => { pins.remove(i); }
+        None => pins.push((key.to_string(), target.to_string())),
+    }
+    pins
+}
+
+/// Pinned apps come first, in pin order, whether they are running or not (like Windows).
+fn merge_pins(mut apps: Vec<App>, pins: &[(String, String)]) -> Vec<App> {
+    let mut out = Vec::new();
+    for (key, target) in pins {
+        match apps.iter().position(|a| &a.key == key) {
+            Some(i) => out.push(apps.remove(i)),
+            None => out.push(App { key: key.clone(), icon: target.clone(), windows: vec![] }),
+        }
+    }
+    out.extend(apps);
+    out
+}
+
 fn refresh(st: &mut State) {
     unsafe {
         let mut wins: Vec<HWND> = Vec::new();
@@ -167,6 +199,8 @@ fn refresh(st: &mut State) {
         st.order.extend(new.into_iter().map(|x| x.1));
         let order = st.order.clone();
         apps.sort_by_key(|a| order.iter().position(|k| k == &a.key).unwrap_or(usize::MAX));
+        let pins = st.pins.get_or_insert_with(|| parse_pins(&std::fs::read_to_string(pins_path()).unwrap_or_default())).clone();
+        let apps = merge_pins(apps, &pins);
         let fg = GetForegroundWindow();
         st.active = apps.iter().find(|a| a.windows.contains(&fg)).map(|a| a.key.clone()).or(st.active.take().filter(|_| false));
         // icons for new apps (24px at 100%)
@@ -452,7 +486,9 @@ unsafe fn draw(st: &mut State, mem: HDC, rc: &RECT, dpi: f32) -> windows::core::
         }
         let cx = l + APP_W / 2.0;
         let (dw, col) = if active { (16.0, C_ACCENT) } else { (6.0, C_RUN) };
-        rt.FillRoundedRectangle(&rrect(rect(cx - dw / 2.0, 41.0, cx + dw / 2.0, 44.0), 1.5), &brush(col)?);
+        if !a.windows.is_empty() { // a pinned app that is not running has no mark
+            rt.FillRoundedRectangle(&rrect(rect(cx - dw / 2.0, 41.0, cx + dw / 2.0, 44.0), 1.5), &brush(col)?);
+        }
     }
 
     // ---- tray ----
@@ -564,7 +600,11 @@ unsafe fn press_win(vk: u16) {
 
 unsafe fn activate(st: &State, i: usize) {
     let Some(a) = st.apps.get(i) else { return };
-    let h = a.windows[0];
+    let Some(&h) = a.windows.first() else {
+        // pinned, not running: start it
+        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(a.icon.as_str()), None, None, SW_SHOWNORMAL);
+        return;
+    };
     if st.active.as_deref() == Some(a.key.as_str()) && !IsIconic(h).as_bool() {
         let _ = ShowWindow(h, SW_MINIMIZE);
     } else {
@@ -678,7 +718,10 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 return LRESULT(0);
             }
             if let Some(Hit::App(i)) = ST.with(|s| hit_test(&s.borrow(), w, x, y)) {
-                let (wins, launch) = ST.with(|s| s.borrow().apps.get(i).map(|a| (a.windows.clone(), a.icon.clone())).unwrap_or_default());
+                let (wins, launch, key, pinned) = ST.with(|s| {
+                    let st = s.borrow();
+                    st.apps.get(i).map(|a| (a.windows.clone(), a.icon.clone(), a.key.clone(), st.pins.iter().flatten().any(|p| p.0 == a.key))).unwrap_or_default()
+                });
                 crate::peek::hover(None);
                 if let Ok(m) = CreatePopupMenu() {
                     // like Windows' jump list: the app's recent items, the app itself (opens a new window), then Close
@@ -695,7 +738,12 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         let _ = AppendMenuW(m, MF_STRING, 2, &windows::core::HSTRING::from(name));
                         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
                     }
-                    let _ = AppendMenuW(m, MF_STRING, 1, if wins.len() > 1 { w!("Close all windows") } else { w!("Close window") });
+                    if !launch.is_empty() {
+                        let _ = AppendMenuW(m, MF_STRING, 3, if pinned { w!("Unpin from taskbar") } else { w!("Pin to taskbar") });
+                    }
+                    if !wins.is_empty() {
+                        let _ = AppendMenuW(m, MF_STRING, 1, if wins.len() > 1 { w!("Close all windows") } else { w!("Close window") });
+                    }
                     let mut pt = POINT::default();
                     let _ = GetCursorPos(&mut pt);
                     crate::flyout::force_foreground(hwnd); // menus need a foreground owner to close properly
@@ -707,6 +755,14 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         }
                         2 => {
                             windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(launch.as_str()), None, None, SW_SHOWNORMAL);
+                        }
+                        3 => {
+                            let pins = toggle_pin(ST.with(|s| s.borrow().pins.clone().unwrap_or_default()), &key, &launch);
+                            let text: String = pins.iter().map(|(k, t)| format!("{k}\t{t}\r\n")).collect();
+                            let _ = std::fs::create_dir_all(pins_path().parent().unwrap());
+                            let _ = std::fs::write(pins_path(), text);
+                            ST.with(|s| { let mut st = s.borrow_mut(); st.pins = Some(pins); refresh(&mut st); });
+                            let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                         n if n >= 100 => {
                             if let Some((_, path)) = recent.get(n as usize - 100) {
@@ -889,4 +945,23 @@ pub unsafe fn jump_list(app_id: &str, max: u32) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pins() {
+        let p = parse_pins("a\tshell:AppsFolder\\a\r\nbroken line\n\tno key\nb\tC:\\b.exe\n");
+        assert_eq!(p, vec![("a".to_string(), "shell:AppsFolder\\a".to_string()), ("b".to_string(), "C:\\b.exe".to_string())]);
+        // pinning adds at the end, pinning again removes
+        let q = toggle_pin(p.clone(), "c", "c.exe");
+        assert_eq!(q.len(), 3);
+        assert_eq!(toggle_pin(q, "a", "").iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        // running apps z and b; pins a and b: pinned first in pin order, a without a window, then the rest
+        let run = |k: &str| App { key: k.into(), icon: String::new(), windows: vec![HWND(1 as *mut c_void)] };
+        let m = merge_pins(vec![run("z"), run("b")], &p);
+        assert_eq!(m.iter().map(|a| (a.key.as_str(), a.windows.len())).collect::<Vec<_>>(), [("a", 0), ("b", 1), ("z", 1)]);
+    }
 }

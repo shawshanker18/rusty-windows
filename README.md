@@ -78,7 +78,8 @@ difficulty for every line are in [GOALS.md](docs/GOALS.md).
 - [x] Shell mode with crash watchdog and a one-key way back
 - [ ] Task View (partial), virtual desktops
 - [ ] Clipboard history (text only), emoji panel (no GIFs or symbols)
-- [ ] Pinned taskbar apps, desktop right-click menu, drag and drop
+- [x] Pinned taskbar apps (right-click a taskbar app), desktop right-click menu
+- [ ] Drag and drop onto the taskbar and desktop
 - [ ] Touch keyboard, handwriting, voice typing, input method editors
 - [ ] Widgets, gestures, multi-monitor taskbars, light theme, acrylic and animations
 

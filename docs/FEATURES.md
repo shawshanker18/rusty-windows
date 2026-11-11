@@ -7,7 +7,7 @@ real Windows window at the same size. The project target is 99.99%. "Not measure
 
 | Piece | Source | What works | Match |
 |---|---|---|---|
-| Taskbar | `taskbar.rs` | running apps, clock, tray area, jump lists | not measured |
+| Taskbar | `taskbar.rs` | running apps, pinned apps (right-click, Pin to taskbar), clock, tray area, jump lists | not measured |
 | Start and Search | `launcher.rs` | pinned and all apps, search, calculator answers, routes Calculator, Settings and Explorer to the Rust versions | not measured |
 | System tray | `tray.rs` | icons from running apps, overflow | not measured |
 | Quick Settings | `quick.rs`, `qsx.rs` | Wi-Fi, Bluetooth, sound output, accessibility, performance and temperature pages, volume mixer | not measured |
@@ -50,8 +50,8 @@ Match against the real app: whole window 90.61% (composer row 96.5%, right panel
 
 ## Not done yet
 
-- A cold sign-in in shell mode has not been tested. Pinned taskbar apps, dragging files onto taskbar
-  buttons and the desktop right-click menu are missing.
+- A cold sign-in in shell mode has not been tested. Dragging files onto taskbar buttons
+  or the desktop is missing. Pins are Rusty Windows' own list; apps pinned in Explorer are not read.
 - As the shell, Windows still loads SearchHost and ShellHost (about 135 MB together).
 - Flyout animations and blurred backdrops are basic.
 - Notepad has one document per window: no tabs, no spell check, and it is not yet opened in place of

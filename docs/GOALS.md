@@ -18,7 +18,8 @@ system. Levels 3 and 4 are long-term and may only ever run on machines whose own
 | Item | Status | Difficulty |
 |---|---|---|
 | Taskbar, running apps, clock | Done | 1 |
-| Pinned taskbar apps, drag onto taskbar buttons, taskbar settings | Planned | 1 |
+| Pinned taskbar apps | Done (own pin list, not Windows' pins) | 1 |
+| Drag onto taskbar buttons, taskbar settings | Planned | 1 |
 | Start menu and app list | Done | 1 |
 | Search (apps, settings, files, calculator answers) | Done | 1 |
 | Full file-content search index (replacing Windows Search) | Planned | 3 |
@@ -39,7 +40,8 @@ system. Levels 3 and 4 are long-term and may only ever run on machines whose own
 | Touch keyboard, handwriting panel, voice typing | Planned | 2 |
 | Input method editors (IME) for East Asian languages | Planned | 3 |
 | Desktop icons, show desktop, peek | Done | 1 |
-| Desktop right-click menu, drag and drop on the desktop | Planned | 1 |
+| Desktop right-click menu (Windows' own menu) | Done | 1 |
+| Drag and drop on the desktop | Planned | 1 |
 | Wallpaper: picture, slideshow, video | Partial (video and picture) | 1 |
 | Widgets board | Planned | 2 |
 | Window thumbnails and hover previews | Done | 1 |
