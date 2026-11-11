@@ -72,6 +72,8 @@ struct Ui {
     editing: bool,           // address box is in typing mode
     searching: bool,         // search box has focus
     renaming: Option<usize>, // row being renamed in place
+    view: u8,                // 0 details, 1 large icons, 2 list. ponytail: not remembered between runs
+    big: HashMap<String, (u32, u32, Vec<u8>)>, // 48px icons and picture thumbnails for the icons view
     no_preview: bool,        // preview pane closed. ponytail: starts open, not saved; persist when someone asks
     thumb: Option<(String, u32, u32, Vec<u8>)>, // preview of the selected file: path, width, height, pixels
     tabs: Vec<(String, Vec<String>, Vec<String>)>, // every tab's folder, back and forward lists (the active one's live copy is in path/back/fwd)
@@ -107,6 +109,62 @@ fn known(id: *const windows::core::GUID) -> Option<String> {
 
 pub const HOME: &str = "Home";
 static PINNED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+/// Home's recent files: name, full path, size, when it was last opened.
+static RECENT: std::sync::Mutex<Vec<(String, String, u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// The files you opened most recently, newest first: Windows keeps a shortcut per opened item in its
+/// Recent folder; each one is resolved to its target and kept if that is a file that still exists.
+unsafe fn recent_files(max: usize) -> Vec<(String, String, u64, u64)> {
+    use windows::Win32::System::Com::{IPersistFile, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    let dir = format!("{}\\Microsoft\\Windows\\Recent", std::env::var("APPDATA").unwrap_or_default());
+    let mut links: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")))
+        .filter_map(|e| Some((e.metadata().ok()?.last_write_time(), e.path())))
+        .collect();
+    links.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out: Vec<(String, String, u64, u64)> = Vec::new();
+    // ponytail: looks at the newest 80 shortcuts only; plenty for a list of 20
+    for (when, lnk) in links.into_iter().take(80) {
+        if out.len() >= max {
+            break;
+        }
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER) else { break };
+        let Ok(file) = windows::core::Interface::cast::<IPersistFile>(&link) else { break };
+        if file.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ).is_err() {
+            continue;
+        }
+        let mut buf = [0u16; 520];
+        if link.GetPath(&mut buf, std::ptr::null_mut(), 0).is_err() {
+            continue;
+        }
+        let target = String::from_utf16_lossy(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(0)]);
+        let path = std::path::Path::new(&target);
+        let (Some(name), Ok(m)) = (path.file_name().map(|n| n.to_string_lossy().to_string()), std::fs::metadata(path)) else { continue };
+        if m.is_file() && !out.iter().any(|r| r.0 == name) {
+            out.push((name, target, m.len(), when));
+        }
+    }
+    out
+}
+
+/// Where item `i` of `n` sits in the list area before scrolling, as (x, y, width, height) from the
+/// list's top-left corner, and how tall the whole list is. `view`: 0 details, 1 large icons, 2 list.
+// ponytail: the list view fills rows left to right and scrolls down; Windows' fills columns and scrolls sideways
+pub fn cell(view: u8, i: usize, n: usize, width: f32) -> ((f32, f32, f32, f32), f32) {
+    let (w, h) = match view {
+        1 => (104.0, 112.0),
+        2 => (260.0, 24.0),
+        _ => (width, ROW),
+    };
+    let cols = if view == 0 { 1 } else { ((width / w).floor() as usize).max(1) };
+    (((i % cols) as f32 * w, (i / cols) as f32 * h, w, h), n.div_ceil(cols) as f32 * h)
+}
+
+/// Width the items have to lay themselves out in, for a window `cw` wide.
+fn list_width(ui: &Ui, cw: f32) -> f32 {
+    if ui.view == 0 { COLS_END - 4.0 - COLS[0].1 } else { (if ui.no_preview { cw - 14.0 } else { cw - 290.0 }) - COLS[0].1 }
+}
 
 /// Your pinned folders: Windows' own Quick access list (name, path).
 unsafe fn quick_access() -> Vec<(String, String, bool)> {
@@ -196,6 +254,7 @@ unsafe fn namespaces() -> Vec<(String, String, String)> {
 fn places() -> Vec<(String, String, u32)> {
     let pinned = unsafe { quick_access() };
     *PINNED.lock().unwrap() = pinned.iter().map(|(n, p, _)| (n.clone(), p.clone())).collect();
+    *RECENT.lock().unwrap() = unsafe { recent_files(20) };
     let mut v = vec![(HOME.to_string(), HOME.to_string(), 0)];
     // ponytail: Gallery opens your Pictures folder as a list; Windows' photo-timeline view isn't built yet
     if let Some(pics) = known(&FOLDERID_Pictures) {
@@ -273,7 +332,11 @@ pub fn list(path: &str) -> Vec<Entry> {
         return drives();
     }
     if path == HOME {
-        return PINNED.lock().unwrap().iter().map(|(n, _)| Entry { name: n.clone(), dir: true, size: 0, modified: 0, kind: "File folder".into() }).collect();
+        // your pinned folders, then the files you opened most recently (like Windows' Home)
+        let mut v: Vec<Entry> = PINNED.lock().unwrap().iter().map(|(n, _)| Entry { name: n.clone(), dir: true, size: 0, modified: 0, kind: "File folder".into() }).collect();
+        let mut types = HashMap::new();
+        v.extend(RECENT.lock().unwrap().iter().map(|(n, p, size, when)| Entry { name: n.clone(), dir: false, size: *size, modified: *when, kind: type_name(p, false, &mut types) }));
+        return v;
     }
     let mut types = HashMap::new();
     let mut out = Vec::new();
@@ -336,6 +399,9 @@ fn date_text(ft: u64) -> String {
 
 fn full(path: &str, e: &Entry) -> String {
     if path == HOME {
+        if !e.dir {
+            return RECENT.lock().unwrap().iter().find(|r| r.0 == e.name).map(|r| r.1.clone()).unwrap_or_default();
+        }
         return PINNED.lock().unwrap().iter().find(|(n, _)| *n == e.name).map(|(_, p)| p.clone()).unwrap_or_default();
     }
     if path == THIS_PC {
@@ -608,8 +674,11 @@ pub(crate) unsafe fn image(path: &str, side: i32, flags: SIIGBF) -> Option<(u32,
     conv.GetSize(&mut w_, &mut h_).ok()?;
     let mut px = vec![0u8; (w_ * h_ * 4) as usize];
     conv.CopyPixels(std::ptr::null(), w_ * 4, &mut px).ok()?;
-    if px.chunks(4).all(|p| p[3] == 0) {
-        px.chunks_mut(4).for_each(|p| p[3] = 255); // pictures without transparency come back with an empty alpha channel
+    // pictures without transparency come back with an empty alpha channel: make those opaque. A
+    // picture that is all zeros has nothing in it at all (fully transparent) and is left that way,
+    // instead of being turned into a black square.
+    if px.chunks(4).all(|p| p[3] == 0) && px.iter().any(|v| *v != 0) {
+        px.chunks_mut(4).for_each(|p| p[3] = 255);
     }
     Some((w_, h_, px))
 }
@@ -884,19 +953,24 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
     // ---- rows ----
     let view_bot = ch - STATUS;
     let no_ext = hide_ext();
-    let max = (ui.entries.len() as f32 * ROW - (view_bot - LIST_TOP)).max(0.0);
+    let (n_items, lw) = (ui.entries.len(), list_width(ui, cw));
+    let total = cell(ui.view, 0, n_items, lw).1;
+    let max = (total - (view_bot - LIST_TOP)).max(0.0);
     ui.scroll = ui.scroll.clamp(0.0, max);
+    let name_mid = fmt(12.0, w!("Segoe UI Variable Text"))?;
+    name_mid.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
     rt.PushAxisAlignedClip(&rect(NAVW + 1.0, LIST_TOP, cw, view_bot), D2D1_ANTIALIAS_MODE_ALIASED);
     if ui.entries.is_empty() {
         txt(if ui.filter.is_empty() { "This folder is empty." } else { "No items match your search." }, &ui9, rect(COLS[0].1 + 16.0, LIST_TOP + 8.0, cw - 12.0, LIST_TOP + 36.0), &dim);
     }
     for i in 0..ui.entries.len() {
-        let y = LIST_TOP + i as f32 * ROW - ui.scroll;
-        if y + ROW < LIST_TOP || y > view_bot {
+        let ((cx, cy, cwid, chgt), _) = cell(ui.view, i, n_items, lw);
+        let (x, y) = (COLS[0].1 + cx, LIST_TOP + cy - ui.scroll);
+        if y + chgt < LIST_TOP || y > view_bot {
             continue;
         }
         let e = ui.entries[i].clone();
-        let r = rect(COLS[0].1, y, COLS_END - 4.0, y + ROW);
+        let r = rect(x, y, x + cwid, y + chgt);
         let is_sel = ui.sel == Some(i) || ui.more.contains(&i);
         if is_sel || hover == Some(Hit::Row(i)) {
             rt.FillRoundedRectangle(&rrect(rect(r.left, r.top + 1.0, r.right, r.bottom - 1.0), 3.0), &b(if is_sel { 0x383838 } else { 0x2B2B2B })?);
@@ -904,8 +978,32 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         let p = full(&ui.path, &e);
         let ext = std::path::Path::new(&e.name).extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
         let key = if e.dir { if ui.path == THIS_PC || ui.path == HOME { p.clone() } else { "<dir>".into() } } else if matches!(ext.as_str(), "exe" | "lnk" | "ico" | "url") { p.clone() } else { format!(".{ext}") };
-        icon16(ui, &key, &p, COLS[0].1 + 4.0, y + 6.0);
         let shown = if no_ext && !e.dir { std::path::Path::new(&e.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| e.name.clone()) } else { e.name.clone() };
+        if ui.view == 1 {
+            // large icons: the picture itself for pictures, else the 48px icon; name centred underneath
+            // ponytail: thumbnails are made as they come into view, on this thread; a folder of big photos stutters once
+            let bk = if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico") { format!("big:{p}") } else { format!("big:{key}") };
+            if !ui.big.contains_key(&bk) {
+                let im = image(&p, 48, SIIGBF_RESIZETOFIT).unwrap_or((0, 0, Vec::new()));
+                ui.big.insert(bk.clone(), im);
+            }
+            if let Some((w_, h_, px)) = ui.big.get(&bk).filter(|b| b.0 > 0) {
+                if let Ok(bm) = rt.CreateBitmap(D2D_SIZE_U { width: *w_, height: *h_ }, Some(px.as_ptr() as *const c_void), w_ * 4, &bp) {
+                    let (ix, iy) = ((x + (cwid - *w_ as f32) / 2.0).round(), (y + 6.0 + (48.0 - *h_ as f32) / 2.0).round());
+                    rt.DrawBitmap(&bm, Some(&rect(ix, iy, ix + *w_ as f32, iy + *h_ as f32)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+                }
+            }
+            txt(&shown, &name_mid, rect(x + 4.0, y + 60.0, x + cwid - 4.0, y + chgt - 2.0), &white);
+            hits.push((r, Hit::Row(i)));
+            continue;
+        }
+        if ui.view == 2 {
+            icon16(ui, &key, &p, x + 4.0, y + 4.0);
+            gtxt(&shown, &ui9, rect(x + 24.0, y, x + cwid - 6.0, y + chgt), &white);
+            hits.push((r, Hit::Row(i)));
+            continue;
+        }
+        icon16(ui, &key, &p, COLS[0].1 + 4.0, y + 6.0);
         gtxt(&shown, &ui9, rect(COLS[0].1 + 24.0, y, COLS[1].1 - 8.0, y + ROW), &white);
         gtxt(&date_text(e.modified), &ui9, rect(COLS[1].1 + 6.0, y, COLS[2].1 - 8.0, y + ROW), &dim);
         gtxt(&e.kind, &ui9, rect(COLS[2].1 + 6.0, y, COLS[3].1 - 8.0, y + ROW), &dim);
@@ -917,7 +1015,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
     rt.PopAxisAlignedClip();
 
     if max > 0.0 {
-        let all = ui.entries.len() as f32 * ROW;
+        let all = total;
         let (t0, t1) = (CMD + 17.0, view_bot - 12.0);
         let (len, at) = ((t1 - t0) * (view_bot - LIST_TOP) / all, (t1 - t0) * ui.scroll / all);
         let x = if ui.no_preview { cw - 10.0 } else { cw - 286.0 };
@@ -1330,17 +1428,22 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     let mut rc = RECT::default();
                     let _ = GetClientRect(hwnd, &mut rc);
                     let view = rc.bottom as f32 / s - LIST_TOP - STATUS;
-                    let y = i as f32 * ROW;
+                    let ((_, y, _, hgt), _) = cell(ui.view, i, ui.entries.len(), list_width(&ui, rc.right as f32 / s));
                     if y < ui.scroll {
                         ui.scroll = y;
-                    } else if y + ROW > ui.scroll + view {
-                        ui.scroll = y + ROW - view;
+                    } else if y + hgt > ui.scroll + view {
+                        ui.scroll = y + hgt - view;
                     }
                 }
             });
             redraw();
         }
         WM_ERASEBKGND => return LRESULT(1),
+        // for the checks: switch the view without opening the menu (wParam 0 details, 1 icons, 2 list)
+        m if m == WM_APP + 77 => {
+            UI.with(|u| { let mut ui = u.borrow_mut(); ui.view = (wp.0 as u8).min(2); ui.scroll = 0.0; });
+            redraw();
+        }
         WM_PAINT => paint(hwnd),
         WM_CLOSE => {
             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -1403,9 +1506,20 @@ unsafe fn command(hwnd: HWND, h: Hit, s: f32) {
         Hit::Cmd(4) => {
             // rename in place: the text box sits on the name
             if let (Some(i), Some(e)) = (sel, sel.and_then(|i| UI.with(|u| u.borrow().entries.get(i).cloned()))) {
-                let y = UI.with(|u| LIST_TOP + i as f32 * ROW - u.borrow().scroll);
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let (ex, ey, ew) = UI.with(|u| {
+                    let ui = u.borrow();
+                    let ((cx, cy, cwid, chgt), _) = cell(ui.view, i, ui.entries.len(), list_width(&ui, rc.right as f32 / s));
+                    let (x, y) = (COLS[0].1 + cx, LIST_TOP + cy - ui.scroll);
+                    match ui.view {
+                        1 => (x + 4.0, y + chgt - 28.0, cwid - 8.0),
+                        2 => (x + 24.0, y + 2.0, cwid - 30.0),
+                        _ => (COLS[0].1 + 24.0, y + 4.0, COLS[1].1 - COLS[0].1 - 32.0),
+                    }
+                });
                 UI.with(|u| u.borrow_mut().renaming = Some(i));
-                let _ = SetWindowPos(edit, None, ((COLS[0].1 + 24.0) * s) as i32, ((y + 4.0) * s) as i32, ((COLS[1].1 - COLS[0].1 - 32.0) * s) as i32, (20.0 * s) as i32, SWP_NOZORDER | SWP_SHOWWINDOW);
+                let _ = SetWindowPos(edit, None, (ex * s) as i32, (ey * s) as i32, (ew * s) as i32, (20.0 * s) as i32, SWP_NOZORDER | SWP_SHOWWINDOW);
                 let _ = SetWindowTextW(edit, &HSTRING::from(e.name.as_str()));
                 let _ = SetFocus(Some(edit));
                 SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
@@ -1478,7 +1592,10 @@ unsafe fn command(hwnd: HWND, h: Hit, s: f32) {
         Hit::Cmd(7) => {
             if let Ok(m) = CreatePopupMenu() {
                 let (hid, ext) = (show_hidden(), !hide_ext());
-                let _ = AppendMenuW(m, MF_STRING | MF_CHECKED, 0, w!("Details"));
+                let view = UI.with(|u| u.borrow().view);
+                for (id, v, label) in [(11usize, 1u8, w!("Large icons")), (12, 2, w!("List")), (10, 0, w!("Details"))] {
+                    let _ = AppendMenuW(m, if view == v { MF_STRING | MF_CHECKED } else { MF_STRING }, id, label);
+                }
                 let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
                 let _ = AppendMenuW(m, if ext { MF_STRING | MF_CHECKED } else { MF_STRING }, 1, w!("File name extensions"));
                 let _ = AppendMenuW(m, if hid { MF_STRING | MF_CHECKED } else { MF_STRING }, 2, w!("Hidden items"));
@@ -1489,6 +1606,7 @@ unsafe fn command(hwnd: HWND, h: Hit, s: f32) {
                 match cmd {
                     1 => crate::qsx::set_reg_dword(ADVANCED, w!("HideFileExt"), ext as u32),
                     2 => crate::qsx::set_reg_dword(ADVANCED, w!("Hidden"), if hid { 2 } else { 1 }),
+                    10..=12 => UI.with(|u| { let mut ui = u.borrow_mut(); ui.view = [0, 1, 2][(cmd - 10) as usize]; ui.scroll = 0.0; }),
                     _ => {}
                 }
                 UI.with(|u| load(&mut u.borrow_mut()));
@@ -1545,6 +1663,18 @@ pub unsafe fn show(inst: HINSTANCE, path: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn views_lay_items_out() {
+        // details: one per row, full width
+        assert_eq!(cell(0, 3, 10, 500.0), ((0.0, 3.0 * ROW, 500.0, ROW), 10.0 * ROW));
+        // large icons: 104 wide tiles, as many as fit (4 in 430), 10 items -> 3 rows
+        assert_eq!(cell(1, 5, 10, 430.0), ((104.0, 112.0, 104.0, 112.0), 336.0));
+        // list: 260 wide names; a narrow pane still shows one column
+        assert_eq!(cell(2, 3, 4, 600.0), ((260.0, 24.0, 260.0, 24.0), 48.0));
+        assert_eq!(cell(2, 3, 4, 100.0).0, (0.0, 72.0, 260.0, 24.0));
+        assert_eq!(cell(1, 0, 0, 430.0).1, 0.0);
+    }
     fn e(name: &str, dir: bool, size: u64) -> Entry {
         Entry { name: name.into(), dir, size, modified: size, kind: String::new() }
     }
