@@ -354,6 +354,41 @@ unsafe fn draw_picker(dc: HDC, rc: &RECT, s: f32, hover: Option<(usize, usize)>,
     rt.EndDraw(None, None)
 }
 
+/// Snap Assist's cards: the one under the mouse lighter, the keyboard's choice outlined in the accent
+/// colour, each with its window's title (icons are added afterwards).
+unsafe fn draw_assist(dc: HDC, rc: &RECT, s: f32, cards: &[((f32, f32, f32, f32), String, isize)], sel: usize, hover: Option<usize>) -> windows::core::Result<()> {
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use crate::flyout::{rect, rrect, utf16};
+    use crate::quick::rgb;
+    let f: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+    let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, ..Default::default() };
+    let rt = f.CreateDCRenderTarget(&props)?;
+    rt.BindDC(dc, rc)?;
+    rt.SetDpi(96.0 * s, 96.0 * s);
+    let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let title = dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0, w!(""))?;
+    title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+    title.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+    let b = |c: u32| rt.CreateSolidColorBrush(&rgb(c), None);
+    rt.BeginDraw();
+    rt.Clear(Some(&crate::flyout::base(rgb(0x202020))));
+    for (i, ((x, y, w, h), name, icon)) in cards.iter().enumerate() {
+        let card = rect(x - 6.0, y - 4.0, x + w + 6.0, y + h + 6.0);
+        if i == sel || hover == Some(i) {
+            rt.FillRoundedRectangle(&rrect(card, 5.0), &b(0x383838)?);
+        }
+        if i == sel {
+            rt.DrawRoundedRectangle(&rrect(rect(card.left + 1.0, card.top + 1.0, card.right - 1.0, card.bottom - 1.0), 5.0), &b(0x4CC2FF)?, 2.0, None);
+        }
+        let left = if *icon != 0 { x + 22.0 } else { *x };
+        rt.DrawText(&utf16(name), &title, &rect(left, *y, x + w, y + A_HEAD * w / A_BOX.0), &b(0xFFFFFF)?, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    }
+    rt.EndDraw(None, None)
+}
+
 pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst, lpszClassName: w!("shellbits_snap"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
     RegisterClassW(&wc);
@@ -367,6 +402,7 @@ pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     RegisterClassW(&wc);
     let a = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, w!("shellbits_assist"), w!("Snap Assist"), WS_POPUP, 0, 0, 10, 10, None, None, Some(inst), None)?;
     let _ = DwmSetWindowAttribute(a, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
+    let _ = crate::fluent_window(a); // Windows' blurred panel material
     ASSIST.store(a.0 as isize, Relaxed);
     Ok(())
 }
@@ -583,38 +619,24 @@ unsafe extern "system" fn assist_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 let dc = BeginPaint(hwnd, &mut ps);
                 let mut rc = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rc);
-                let bg = CreateSolidBrush(COLORREF(0x202020));
-                FillRect(dc, &rc, bg);
-                let _ = DeleteObject(bg.into());
-                let font = CreateFontW(-(12.0 * s) as i32, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
-                let old = SelectObject(dc, font.into());
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, COLORREF(0xFFFFFF));
-                for (i, (c, w)) in a.cells.iter().zip(&a.wins).enumerate() {
-                    let (l, t, r, b) = (((c.0 - 6.0) * s) as i32, ((c.1 - 4.0) * s) as i32, ((c.0 + c.2 + 6.0) * s) as i32, ((c.1 + c.3 + 6.0) * s) as i32);
-                    if i == a.sel || a.hover == Some(i) {
-                        // the card under the mouse is lighter; the keyboard's choice has the accent outline
-                        let brush = CreateSolidBrush(COLORREF(0x383838));
-                        let pen = CreatePen(PS_SOLID, (2.0 * s) as i32, COLORREF(if i == a.sel { 0xFFC24C } else { 0x383838 }));
-                        let (ob, op) = (SelectObject(dc, brush.into()), SelectObject(dc, pen.into()));
-                        let _ = RoundRect(dc, l, t, r, b, (10.0 * s) as i32, (10.0 * s) as i32);
-                        SelectObject(dc, ob);
-                        SelectObject(dc, op);
-                        let _ = DeleteObject(brush.into());
-                        let _ = DeleteObject(pen.into());
+                // Direct2D into a buffer that keeps alpha (Windows' blurred material shows through);
+                // the app icons go on top with GDI, which keeps their own transparency
+                use windows::Win32::UI::Controls::{BeginBufferedPaint, EndBufferedPaint, BPBF_TOPDOWNDIB, BPPF_ERASE, BP_PAINTPARAMS};
+                let params = BP_PAINTPARAMS { cbSize: size_of::<BP_PAINTPARAMS>() as u32, dwFlags: BPPF_ERASE, ..Default::default() };
+                let mut mem = HDC::default();
+                let pb = BeginBufferedPaint(dc, &rc, BPBF_TOPDOWNDIB, Some(&params), &mut mem);
+                if !mem.is_invalid() {
+                    let cards: Vec<((f32, f32, f32, f32), String, isize)> = a.cells.iter().zip(&a.wins).map(|(c, w)| (*c, String::from_utf16_lossy(&w.1).trim_end_matches('\0').to_string(), w.4 as isize)).collect();
+                    let _ = draw_assist(mem, &rc, s, &cards, a.sel, a.hover);
+                    for ((x, y, cw, _), _, icon) in &cards {
+                        if *icon != 0 {
+                            let (top, bot) = ((y * s) as i32, ((y + A_HEAD * cw / A_BOX.0) * s) as i32);
+                            let side = (16.0 * s) as i32;
+                            let _ = DrawIconEx(mem, (x * s) as i32, (top + bot - side) / 2, HICON(*icon as *mut c_void), side, side, 0, None, DI_NORMAL);
+                        }
                     }
-                    let mut tr = RECT { left: (c.0 * s) as i32, top: (c.1 * s) as i32, right: ((c.0 + c.2) * s) as i32, bottom: ((c.1 + A_HEAD * c.2 / A_BOX.0) * s) as i32 };
-                    if w.4 != 0 {
-                        // the app's icon, then its title
-                        let side = (16.0 * s) as i32;
-                        let _ = DrawIconEx(dc, tr.left, (tr.top + tr.bottom - side) / 2, HICON(w.4 as *mut c_void), side, side, 0, None, DI_NORMAL);
-                        tr.left += side + (6.0 * s) as i32;
-                    }
-                    let mut title = w.1.clone();
-                    DrawTextW(dc, &mut title, &mut tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+                    let _ = EndBufferedPaint(pb, true);
                 }
-                SelectObject(dc, old);
-                let _ = DeleteObject(font.into());
                 let _ = EndPaint(hwnd, &ps);
             }
             WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
