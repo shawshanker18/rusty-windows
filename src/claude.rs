@@ -532,6 +532,26 @@ fn tail_title(path: &std::path::Path) -> Option<String> {
     last_title(&String::from_utf8_lossy(&buf))
 }
 
+/// The folder named by the newest line in `text` that names one. A session started without a folder
+/// and later moved into a project says so only in its later lines.
+pub fn last_cwd(text: &str) -> Option<String> {
+    text.lines().rev().filter(|l| l.contains("\"cwd\"")).find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        v["cwd"].as_str().filter(|c| !c.is_empty()).map(str::to_string)
+    })
+}
+
+/// `last_cwd` over the last 64 KB of a session file.
+fn tail_cwd(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(65_536))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    last_cwd(&String::from_utf8_lossy(&buf))
+}
+
 /// The line Claude Code itself writes when a session is renamed.
 pub fn title_line(id: &str, title: &str) -> String {
     serde_json::json!({ "type": "custom-title", "customTitle": title, "sessionId": id }).to_string()
@@ -582,6 +602,11 @@ fn read_session(p: &std::path::Path, id: &str, modified: u64) -> Option<SessionI
     if let Some(t) = tail_title(p) {
         info.title = t;
     }
+    // where the session is NOW: one that was moved into a project belongs in that project's group
+    // (the first folder is often the app's own scratch folder, which put everything under "This computer")
+    if let Some(c) = tail_cwd(p) {
+        info.cwd = c;
+    }
     if info.title.is_empty() {
         info.title = if first_prompt.is_empty() { "New session".into() } else { first_prompt };
     }
@@ -605,11 +630,80 @@ pub fn sessions_from_text(text: &str) -> Vec<SessionInfo> {
 }
 
 fn sessions_cache() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("shellbits").join("claude-sessions.txt")
+    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("shellbits").join("claude-sessions-2.txt")
 }
 
 /// Every session, newest first. Reading 250 session files takes half a second or more, so what was
 /// learned last time is kept: a file whose modified time has not changed is not opened again.
+/// What the real Claude desktop app records about one of its sessions (its own files, only ever read).
+#[derive(Debug, Default, PartialEq)]
+pub struct AppInfo {
+    pub title: String,
+    pub folder: String, // the project folder it is filed under ("" when it has none)
+    pub starred: bool,  // pinned in the app's sidebar
+    pub archived: bool,
+    pub status: String, // completed / review_ready / blocked ... from the app's last summary
+    pub last: u64,      // last activity, seconds
+}
+
+/// One of the app's `local_<id>.json` session records -> (the CLI session id it belongs to, its details).
+pub fn parse_app_session(json: &str) -> Option<(String, AppInfo)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let id = v["cliSessionId"].as_str().filter(|s| !s.is_empty())?.to_string();
+    let text = |x: &serde_json::Value| x.as_str().unwrap_or("").to_string();
+    // a project folder is one the user chose; the app's own scratch folders are "This computer"
+    let folder = [&v["folderPlace"]["cwd"], &v["gitAnchorsFolderRealpath"]].into_iter().map(text).find(|f| !f.is_empty()).unwrap_or_default();
+    Some((id, AppInfo {
+        title: text(&v["title"]),
+        folder,
+        starred: v["isStarred"] == true,
+        archived: v["isArchived"] == true,
+        status: text(&v["postTurnSummary"]["status_category"]),
+        last: v["lastActivityAt"].as_u64().unwrap_or(0) / 1000,
+    }))
+}
+
+/// Every session the desktop app knows, by CLI session id. Empty when the app is not installed.
+fn app_sessions() -> std::collections::HashMap<String, AppInfo> {
+    let root = std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("Claude").join("claude-code-sessions");
+    let mut out = std::collections::HashMap::new();
+    for a in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        for b in std::fs::read_dir(a.path()).into_iter().flatten().flatten() {
+            for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                if name.starts_with("local_") && name.ends_with(".json") {
+                    out.extend(std::fs::read_to_string(f.path()).ok().and_then(|t| parse_app_session(&t)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Sessions the app has starred: they show under Pinned, with the ones pinned in this window.
+static STARRED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Make the list say what the real app's sidebar says: its titles, its project folders, its pins,
+/// newest activity first, archived ones left out. Sessions the app does not know keep their own details
+/// and come after.
+pub fn overlay(mut list: Vec<SessionInfo>, app: &std::collections::HashMap<String, AppInfo>) -> (Vec<SessionInfo>, Vec<String>) {
+    list.retain(|s| !app.get(&s.id).is_some_and(|a| a.archived));
+    for s in &mut list {
+        if let Some(a) = app.get(&s.id) {
+            if !a.title.is_empty() {
+                s.title = a.title.clone();
+            }
+            if !a.folder.is_empty() {
+                s.cwd = a.folder.clone();
+            }
+            s.modified = s.modified.max(a.last);
+        }
+    }
+    list.sort_by(|x, y| (app.contains_key(&y.id), y.modified).cmp(&(app.contains_key(&x.id), x.modified)));
+    let starred = list.iter().filter(|s| app.get(&s.id).is_some_and(|a| a.starred)).map(|s| s.id.clone()).collect();
+    (list, starred)
+}
+
 pub fn scan_sessions() -> Vec<SessionInfo> {
     let known: std::collections::HashMap<String, SessionInfo> = sessions_from_text(&std::fs::read_to_string(sessions_cache()).unwrap_or_default()).into_iter().map(|s| (s.id.clone(), s)).collect();
     let mut out = Vec::new();
@@ -633,6 +727,8 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(cache, sessions_to_text(&out));
+    let (out, starred) = overlay(out, &app_sessions());
+    *STARRED.lock().unwrap() = starred;
     out
 }
 
@@ -1895,10 +1991,15 @@ fn pins_file() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("shellbits").join("claude-pins.txt")
 }
 fn pins() -> Vec<String> {
+    let mut all = own_pins();
+    all.extend(STARRED.lock().unwrap().iter().filter(|s| !all.contains(s)).cloned().collect::<Vec<_>>());
+    all
+}
+fn own_pins() -> Vec<String> {
     PINS.lock().unwrap().get_or_insert_with(|| std::fs::read_to_string(pins_file()).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).clone()
 }
 fn toggle_pin(id: &str) {
-    let mut list = pins();
+    let mut list = own_pins();
     match list.iter().position(|p| p == id) {
         Some(i) => _ = list.remove(i),
         None => list.push(id.to_string()),
@@ -2745,6 +2846,28 @@ mod tests {
 
     #[test]
     fn sidebar_groups() {
+        // the real app's record of a session, and what it does to our list
+        let rec = r#"{"sessionId":"local_1","cliSessionId":"abc","title":"Part 1","isStarred":true,"isArchived":false,"lastActivityAt":5000000,"folderPlace":{"cwd":"C:/Users/me/Desktop/proj"},"postTurnSummary":{"status_category":"review_ready"}}"#;
+        let (id, a) = parse_app_session(rec).unwrap();
+        assert_eq!((id.as_str(), a.title.as_str(), a.folder.as_str(), a.starred, a.status.as_str(), a.last), ("abc", "Part 1", "C:/Users/me/Desktop/proj", true, "review_ready", 5000));
+        assert_eq!(parse_app_session("{}"), None);
+        let mut app = std::collections::HashMap::new();
+        app.insert(id, a);
+        app.insert("gone".to_string(), AppInfo { archived: true, ..Default::default() });
+        let si = |id: &str, m: u64| SessionInfo { id: id.into(), title: "old".into(), cwd: "C:/scratch".into(), modified: m };
+        let (list, starred) = overlay(vec![si("other", 9000), si("abc", 10), si("gone", 99)], &app);
+        // the app's session first with the app's title and folder; the archived one is gone; the unknown one after
+        assert_eq!(list.iter().map(|s| (s.id.as_str(), s.title.as_str())).collect::<Vec<_>>(), [("abc", "Part 1"), ("other", "old")]);
+        assert_eq!(list[0].cwd, "C:/Users/me/Desktop/proj");
+        assert_eq!(starred, ["abc"]);
+        // the newest folder wins; lines without one, or broken ones, are skipped
+        let log = "{\"type\":\"user\",\"cwd\":\"C:/scratch\"}
+{\"type\":\"assistant\"}
+{\"cwd\":\"C:/proj/site\",\"type\":\"user\"}
+not json \"cwd\"
+";
+        assert_eq!(last_cwd(log).as_deref(), Some("C:/proj/site"));
+        assert_eq!(last_cwd("{\"type\":\"user\"}"), None);
         let s = |id: &str, title: &str, cwd: &str| SessionInfo { id: id.into(), title: title.into(), cwd: cwd.into(), modified: 0 };
         let all = [s("a", "Alpha", "C:/work/one"), s("b", "Beta", "C:/work/two"), s("c", "Gamma ray", "C:/work/one")];
         assert_eq!(grouped(&all, &[], ""), vec![("one".to_string(), vec![0, 2]), ("two".to_string(), vec![1])]);
