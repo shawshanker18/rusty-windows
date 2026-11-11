@@ -15,7 +15,6 @@ Contributors are welcome, whether it is one pixel or a whole new window.
 
 - Measure the match of a shell piece marked "not measured" and add the number to docs/FEATURES.md
 - Light theme for Calculator
-- A friendly message in the Changes pane when the folder is not a git repository
 - Notepad: spell-check squiggles with the Windows spell checker
 - Pinned apps on the taskbar
 

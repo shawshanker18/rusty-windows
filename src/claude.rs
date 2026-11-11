@@ -228,7 +228,12 @@ fn load_diff(folder: String) {
                 let v: Vec<String> = text.lines().take(2000).map(|l| l.replace('\t', "    ")).collect();
                 if v.iter().all(|l| l.trim().is_empty()) { vec!["No changes.".to_string()] } else { v }
             }
-            (_, Ok(diff)) => vec![String::from_utf8_lossy(&diff.stderr).lines().next().unwrap_or("This folder is not a git repository.").to_string()],
+            (_, Ok(diff)) => {
+                let err = String::from_utf8_lossy(&diff.stderr).to_string();
+                // git's own wording here is a usage hint, not something to show
+                if err.to_lowercase().contains("not a git repository") { vec!["Not a git repository: no changes to show.".to_string()] }
+                else { vec![err.lines().next().unwrap_or("git could not read the changes.").to_string()] }
+            }
             _ => vec!["git was not found on this PC.".to_string()],
         };
         *DIFF.lock().unwrap() = lines;
