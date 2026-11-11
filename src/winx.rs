@@ -596,13 +596,13 @@ fn mru_load() -> Vec<String> {
 
 // ======================= Run: window =======================
 
-const RW: f32 = 400.0;
-const RH: f32 = 200.0;
-const TITLE_H: f32 = 32.0;
-const BOX: (f32, f32, f32, f32) = (60.0, 100.0, RW - 14.0, 132.0);
-const BTN_T: f32 = 152.0;
-const BTN_W: f32 = 96.0;
-const BTNS: [(f32, &str); 3] = [(RW - 14.0 - 3.0 * BTN_W - 16.0, "OK"), (RW - 14.0 - 2.0 * BTN_W - 8.0, "Cancel"), (RW - 14.0 - BTN_W, "Browse...")];
+const RW: f32 = 396.0;
+const RH: f32 = 203.0;
+const TITLE_H: f32 = 30.0;
+const BOX: (f32, f32, f32, f32) = (63.0, 98.0, 382.0, 120.0);
+const BTN_T: f32 = 160.0;
+const BTN_W: f32 = 84.0;
+const BTNS: [(f32, &str); 3] = [(111.0, "OK"), (205.0, "Cancel"), (300.0, "Browse...")];
 const LIST_ROW: f32 = 28.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -618,10 +618,10 @@ fn run_hit(x: f32, y: f32) -> Option<RHit> {
     if y < TITLE_H && x >= RW - 46.0 {
         return Some(RHit::Close);
     }
-    if (BOX.1..BOX.3).contains(&y) && (BOX.2 - 32.0..BOX.2).contains(&x) {
+    if (BOX.1..BOX.3).contains(&y) && (BOX.2 - 20.0..BOX.2).contains(&x) {
         return Some(RHit::Chevron);
     }
-    if (BTN_T..BTN_T + 32.0).contains(&y) {
+    if (BTN_T..BTN_T + 23.0).contains(&y) {
         for (i, (bx, _)) in BTNS.iter().enumerate() {
             if (*bx..bx + BTN_W).contains(&x) {
                 return Some([RHit::Ok, RHit::Cancel, RHit::Browse][i]);
@@ -633,51 +633,46 @@ fn run_hit(x: f32, y: f32) -> Option<RHit> {
 
 unsafe fn draw_run(g: &Gfx, hover: Option<RHit>, typed: Option<&str>) -> windows::core::Result<()> {
     let rt = &g.rt;
-    rt.Clear(Some(&rgb(0x202020)));
     let b = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
-    let white = b(rgb(0xFFFFFF))?;
+    let black = b(rgb(0x000000))?;
     let text = |s: &[u16], f: &IDWriteTextFormat, r: D2D_RECT_F, br: &ID2D1SolidColorBrush| {
         rt.DrawText(s, f, &r, br, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL)
     };
-    // caption: icon, title, close
-    text(&glyph(0xE8A7), &g.icon16, rect(12.0, 0.0, 28.0, TITLE_H), &white);
-    text(&utf16("Run"), &g.small, rect(40.0, 0.0, 200.0, TITLE_H), &white);
+    rt.Clear(Some(&rgb(0xFFFFFF)));
+    // caption (light, like the classic dialog), body, grey footer
+    rt.FillRectangle(&rect(0.0, 0.0, RW, TITLE_H), &b(rgb(0xF3F3F3))?);
+    rt.FillRectangle(&rect(0.0, 141.0, RW, RH), &b(rgb(0xF0F0F0))?);
+    text(&glyph(0xE8A7), &g.icon16, rect(10.0, 0.0, 26.0, TITLE_H), &b(rgb(0x0078D4))?);
+    text(&utf16("Run"), &g.small, rect(32.0, 0.0, 200.0, TITLE_H), &black);
     if hover == Some(RHit::Close) {
         rt.FillRectangle(&rect(RW - 46.0, 0.0, RW, TITLE_H), &b(rgb(0xC42B1C))?);
     }
-    text(&glyph(0xE8BB), &g.icon10, rect(RW - 46.0, 0.0, RW, TITLE_H), &white);
-    // body
-    text(&glyph(0xE8A7), &g.icon32, rect(14.0, 44.0, 46.0, 80.0), &b(g.accent)?);
-    text(
-        &utf16("Type the name of a program, folder, document, or Internet resource, and Windows will open it for you."),
-        &g.desc, rect(60.0, 44.0, RW - 14.0, 92.0), &white,
-    );
-    text(&utf16("Open:"), &g.small, rect(14.0, BOX.1, BOX.0, BOX.3), &white);
-    // text box (focused look: darker fill, accent underline); the EDIT child sits inside it
+    text(&glyph(0xE8BB), &g.icon10, rect(RW - 46.0, 0.0, RW, TITLE_H), &b(rgb(if hover == Some(RHit::Close) { 0xFFFFFF } else { 0x000000 }))?);
+    // the Run icon and the explanation
+    text(&glyph(0xE8A7), &g.icon32, rect(12.0, 44.0, 48.0, 82.0), &b(rgb(0x0078D4))?);
+    text(&utf16("Type the name of a program, folder, document, or Internet resource, and Windows will open it for you."), &g.desc, rect(63.0, 48.0, RW - 14.0, 86.0), &black);
+    text(&utf16("Open:"), &g.small, rect(8.0, BOX.1, BOX.0, BOX.3), &black);
+    // the box: white with Windows' blue focus border, drop-down arrow at the right
     let bx = rect(BOX.0, BOX.1, BOX.2, BOX.3);
-    rt.FillRoundedRectangle(&rrect(bx, 4.0), &b(rgb(0x1F1F1F))?);
-    rt.DrawRoundedRectangle(&rrect(rect(BOX.0 + 0.5, BOX.1 + 0.5, BOX.2 - 0.5, BOX.3 - 0.5), 4.0), &b(D2D1_COLOR_F { a: 0.08, ..rgb(0xFFFFFF) })?, 1.0, None);
-    rt.FillRectangle(&rect(BOX.0 + 1.0, BOX.3 - 2.0, BOX.2 - 1.0, BOX.3), &b(g.accent)?);
+    rt.FillRectangle(&bx, &b(rgb(0xFFFFFF))?);
+    rt.DrawRectangle(&rect(BOX.0 + 0.5, BOX.1 + 0.5, BOX.2 - 0.5, BOX.3 - 0.5), &b(g.accent)?, 1.0, None); // the system accent (#0078D4 by default)
     if hover == Some(RHit::Chevron) {
-        rt.FillRoundedRectangle(&rrect(rect(BOX.2 - 30.0, BOX.1 + 4.0, BOX.2 - 4.0, BOX.3 - 4.0), 4.0), &b(D2D1_COLOR_F { a: 0.06, ..rgb(0xFFFFFF) })?);
+        rt.FillRectangle(&rect(BOX.2 - 19.0, BOX.1 + 1.0, BOX.2 - 1.0, BOX.3 - 1.0), &b(rgb(0xE5F1FB))?);
     }
-    text(&glyph(0xE70D), &g.icon12, rect(BOX.2 - 30.0, BOX.1, BOX.2 - 4.0, BOX.3), &b(D2D1_COLOR_F { a: crate::flyout::SECONDARY, ..rgb(0xFFFFFF) })?);
+    text(&glyph(0xE70D), &g.icon10, rect(BOX.2 - 19.0, BOX.1, BOX.2 - 1.0, BOX.3), &b(rgb(0x606060))?);
     if let Some(t) = typed {
-        text(&utf16(t), &g.body, rect(BOX.0 + 11.0, BOX.1, BOX.2 - 34.0, BOX.3 - 2.0), &white);
+        text(&utf16(t), &g.small, rect(BOX.0 + 3.0, BOX.1, BOX.2 - 20.0, BOX.3), &black);
     }
-    // buttons: accent OK, standard Cancel / Browse...
+    // classic buttons; OK is greyed out while the box is empty, as in Windows
+    let empty = typed.map_or(edit_text().trim().is_empty(), |t| t.trim().is_empty());
     for (i, (x, label)) in BTNS.iter().enumerate() {
-        let r = rect(*x, BTN_T, x + BTN_W, BTN_T + 32.0);
-        let hov = hover == Some([RHit::Ok, RHit::Cancel, RHit::Browse][i]);
-        if i == 0 {
-            let fill = if hov { D2D1_COLOR_F { a: 0.9, ..g.accent } } else { g.accent };
-            rt.FillRoundedRectangle(&rrect(r, 4.0), &b(fill)?);
-            text(&utf16(label), &g.body_c, r, &b(rgb(0x000000))?);
-        } else {
-            rt.FillRoundedRectangle(&rrect(r, 4.0), &b(rgb(if hov { 0x323232 } else { 0x2D2D2D }))?);
-            rt.DrawRoundedRectangle(&rrect(rect(r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom - 0.5), 4.0), &b(D2D1_COLOR_F { a: 0.07, ..rgb(0xFFFFFF) })?, 1.0, None);
-            text(&utf16(label), &g.body_c, r, &white);
-        }
+        let r = rect(*x, BTN_T, x + BTN_W, BTN_T + 23.0);
+        let disabled = i == 0 && empty;
+        let hov = !disabled && hover == Some([RHit::Ok, RHit::Cancel, RHit::Browse][i]);
+        rt.FillRectangle(&r, &b(rgb(if disabled { 0xF5F5F5 } else if hov { 0xE0EEF9 } else { 0xFDFDFD }))?);
+        let edge = if disabled { 0xBFBFBF } else if hov || i == 0 { 0x0078D4 } else { 0xD0D0D0 };
+        rt.DrawRectangle(&rect(r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom - 0.5), &b(rgb(edge))?, 1.0, None);
+        text(&utf16(label), &g.body_c, r, &b(rgb(if disabled { 0x838383 } else { 0x000000 }))?);
     }
     Ok(())
 }
@@ -704,7 +699,7 @@ pub unsafe fn show_run() {
         let _ = SetWindowPos(h, Some(HWND_TOP), wa.left + px(12.0), wa.bottom - hh - px(12.0), w, hh, SWP_SHOWWINDOW);
         // edit font + position follow the DPI of wherever we are now
         let (old, eb, lb) = GDI.with(|g| g.get());
-        let font = CreateFontW(-px(14.0), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
+        let font = CreateFontW(-px(12.0), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
         for c in [hw(&EDIT), hw(&LIST)] {
             SendMessageW(c, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
         }
@@ -712,9 +707,9 @@ pub unsafe fn show_run() {
             let _ = DeleteObject(HGDIOBJ(old as *mut c_void));
         }
         GDI.with(|g| g.set((font.0 as isize, eb, lb)));
-        let eh = px(20.0);
-        let mid = px((BOX.1 + BOX.3) / 2.0 - 1.0);
-        let _ = SetWindowPos(hw(&EDIT), None, px(BOX.0 + 11.0), mid - eh / 2, px(BOX.2 - BOX.0 - 45.0), eh, SWP_NOZORDER);
+        let eh = px(15.0); // inside the 1 px border, which the box draws around it
+        let mid = px((BOX.1 + BOX.3) / 2.0);
+        let _ = SetWindowPos(hw(&EDIT), None, px(BOX.0 + 3.0), mid - eh / 2, px(BOX.2 - BOX.0 - 24.0), eh, SWP_NOZORDER);
         SendMessageW(hw(&LIST), LB_SETITEMHEIGHT, Some(WPARAM(0)), Some(LPARAM(px(LIST_ROW) as isize)));
         // last command pre-filled and selected, like Windows
         let list = mru_load();
@@ -877,7 +872,7 @@ pub unsafe extern "system" fn run_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     match msg {
         WM_CREATE => {
             // opaque, rounded, dark border: GDI text in the EDIT child needs a solid background
-            for (attr, v) in [(DWMWA_USE_IMMERSIVE_DARK_MODE, 1u32), (DWMWA_WINDOW_CORNER_PREFERENCE, 2)] {
+            for (attr, v) in [(DWMWA_USE_IMMERSIVE_DARK_MODE, 0u32), (DWMWA_WINDOW_CORNER_PREFERENCE, 2)] {
                 let _ = DwmSetWindowAttribute(hwnd, attr, &v as *const _ as *const c_void, 4);
             }
             let inst = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).ok().map(|m| m.into());
@@ -893,7 +888,7 @@ pub unsafe extern "system" fn run_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 let v = 2u32;
                 let _ = DwmSetWindowAttribute(l, DWMWA_WINDOW_CORNER_PREFERENCE, &v as *const _ as *const c_void, 4);
             }
-            GDI.with(|g| g.set((0, CreateSolidBrush(COLORREF(0x1F1F1F)).0 as isize, CreateSolidBrush(COLORREF(0x2C2C2C)).0 as isize)));
+            GDI.with(|g| g.set((0, CreateSolidBrush(COLORREF(0xFFFFFF)).0 as isize, CreateSolidBrush(COLORREF(0x2C2C2C)).0 as isize)));
         }
         WM_RUN_EXEC => exec(wp.0 == 1),
         WM_ACTIVATE => {
@@ -907,8 +902,8 @@ pub unsafe extern "system" fn run_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
         WM_CTLCOLOREDIT => {
             let dc = HDC(wp.0 as *mut c_void);
-            SetTextColor(dc, COLORREF(0xFFFFFF));
-            SetBkColor(dc, COLORREF(0x1F1F1F));
+            SetTextColor(dc, COLORREF(0x000000));
+            SetBkColor(dc, COLORREF(0xFFFFFF));
             return LRESULT(GDI.with(|g| g.get().1));
         }
         WM_CTLCOLORLISTBOX => return LRESULT(GDI.with(|g| g.get().2)),
