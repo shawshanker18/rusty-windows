@@ -986,7 +986,8 @@ unsafe fn make_gfx() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFacto
 // ======================= window =======================
 
 fn hit(x: f32, y: f32) -> Option<Hit> {
-    UI.with(|u| u.borrow().hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(_, h)| *h))
+    // try_borrow: asked while the state is in use, the answer is "nothing there" rather than a panic
+    UI.with(|u| u.try_borrow().ok().and_then(|ui| ui.hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(_, h)| *h)))
 }
 
 unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1246,9 +1247,12 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_RBUTTONUP => {
             let (x, y) = dips(lp);
+            // what is under the pointer is worked out BEFORE the state is borrowed: doing it inside
+            // borrowed the state twice and ended the program - every right-click closed File Explorer
+            let under = hit(x, y);
             let (folder, item) = UI.with(|u| {
                 let mut ui = u.borrow_mut();
-                let item = match hit(x, y) {
+                let item = match under {
                     Some(Hit::Row(i)) => {
                         ui.sel = Some(i);
                         ui.entries.get(i).map(|e| full(&ui.path, e))
@@ -1385,7 +1389,10 @@ unsafe fn command(hwnd: HWND, h: Hit, s: f32) {
                 let mut ui = u.borrow_mut();
                 load(&mut ui);
                 ui.sel = ui.entries.iter().position(|e| e.name == name);
+                ui.more.clear();
             });
+            // like Windows: the new folder's name is ready to be typed over
+            command(hwnd, Hit::Cmd(4), s);
         }
         Hit::Cmd(1) if !items.is_empty() => shell_verb(hwnd, &folder, &items, b"cut\0"),
         Hit::Cmd(2) if !items.is_empty() => shell_verb(hwnd, &folder, &items, b"copy\0"),

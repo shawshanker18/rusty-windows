@@ -2248,7 +2248,7 @@ unsafe fn click(hwnd: HWND, act: Act) {
 }
 
 fn hit(x: f32, y: f32) -> Option<Act> {
-    UI.with(|u| u.borrow().hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(_, a)| *a))
+    UI.with(|u| u.try_borrow().ok().and_then(|ui| ui.hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(_, a)| *a)))
 }
 
 pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {

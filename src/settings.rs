@@ -1938,7 +1938,7 @@ fn go(page: usize) {
 }
 
 fn hit(x: f32, y: f32) -> Option<Hit> {
-    UI.with(|u| u.borrow().hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(_, h)| *h))
+    UI.with(|u| u.try_borrow().ok().and_then(|ui| ui.hits.iter().rev().find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).map(|(_, h)| *h)))
 }
 
 pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
