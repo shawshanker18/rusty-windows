@@ -184,6 +184,9 @@ fn senders() -> Vec<crate::qsx::Item> {
 }
 /// Where a list item's icon comes from: a startup entry names its program, anything else is an app id.
 fn icon_source(id: &str) -> String {
+    if id.starts_with("wifi	") {
+        return String::new();
+    }
     match id.split('\t').nth(1).filter(|_| id.starts_with("startup\t") || id.starts_with("app\t")) {
         Some(file) => file.to_string(),
         None => format!("shell:AppsFolder\\{id}"),
@@ -488,6 +491,100 @@ reg_switch!(start_most_used, set_start_most_used, ADV, "Start_TrackProgs", on = 
 reg_switch!(start_recent, set_start_recent, ADV, "Start_TrackDocs", on = 1, off = 0, missing = true);
 reg_switch!(start_tips, set_start_tips, ADV, "Start_IrisRecommendations", on = 1, off = 0, missing = true);
 reg_switch!(start_account, set_start_account, ADV, "Start_AccountNotifications", on = 1, off = 0, missing = true);
+
+// Mouse
+fn primary_button() -> String {
+    if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { "Right".into() } else { "Left".into() }
+}
+fn primary_buttons() -> Vec<String> {
+    vec!["Left".into(), "Right".into()]
+}
+fn set_primary_button(i: usize) {
+    unsafe {
+        let _ = SystemParametersInfoW(SPI_SETMOUSEBUTTONSWAP, (i == 1) as u32, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    }
+}
+/// "Enhance pointer precision" is the third number of the mouse acceleration settings.
+fn precision() -> bool {
+    let mut v = [0i32; 3];
+    unsafe { let _ = SystemParametersInfoW(SPI_GETMOUSE, 0, Some(v.as_mut_ptr() as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    v[2] != 0
+}
+fn set_precision(on: bool) {
+    // Windows' own values: 6 / 10 with acceleration on, 0 / 0 with it off
+    let mut v: [i32; 3] = if on { [6, 10, 1] } else { [0, 0, 0] };
+    unsafe { let _ = SystemParametersInfoW(SPI_SETMOUSE, 0, Some(v.as_mut_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); }
+}
+const WHEEL_STEPS: [u32; 6] = [1, 3, 5, 10, 20, 0xFFFF_FFFF];
+pub fn wheel_label(lines: u32) -> String {
+    match lines { 0xFFFF_FFFF => "One screen at a time".into(), 1 => "1 line".into(), n => format!("{n} lines") }
+}
+fn wheel_lines() -> String {
+    let mut v = 3u32;
+    unsafe { let _ = SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, Some(&mut v as *mut _ as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    wheel_label(v)
+}
+fn wheel_choices() -> Vec<String> {
+    WHEEL_STEPS.iter().map(|n| wheel_label(*n)).collect()
+}
+fn set_wheel_lines(i: usize) {
+    if let Some(n) = WHEEL_STEPS.get(i) {
+        unsafe { let _ = SystemParametersInfoW(SPI_SETWHEELSCROLLLINES, *n, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); }
+    }
+}
+reg_switch!(scroll_inactive, set_scroll_inactive, "Control Panel\\Desktop", "MouseWheelRouting", on = 2, off = 0, missing = true);
+
+// Date & time
+fn now_text() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][t.wDayOfWeek as usize % 7];
+    let month = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][(t.wMonth as usize + 11) % 12];
+    let (h, ampm) = (if t.wHour % 12 == 0 { 12 } else { t.wHour % 12 }, if t.wHour < 12 { "AM" } else { "PM" });
+    format!("{h}:{:02} {ampm}, {day}, {month} {}, {}", t.wMinute, t.wDay, t.wYear)
+}
+/// Windows sets the clock itself when its time service uses an internet time server (NTP).
+fn auto_time() -> bool {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    !reg_str(HKEY_LOCAL_MACHINE, w!("SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters"), w!("Type")).eq_ignore_ascii_case("NoSync")
+}
+/// The time-zone updater is a service: running unless its start type is "disabled" (4).
+fn auto_zone() -> bool {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    reg_u32(HKEY_LOCAL_MACHINE, w!("SYSTEM\\CurrentControlSet\\Services\\tzautoupdate"), w!("Start")) != Some(4)
+}
+fn time_server() -> String {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    let s = reg_str(HKEY_LOCAL_MACHINE, w!("SYSTEM\\CurrentControlSet\\Services\\W32Time\\Parameters"), w!("NtpServer"));
+    s.split([',', ' ']).next().unwrap_or("").to_string()
+}
+fn zone_text() -> String {
+    let mut tz = windows::Win32::System::Time::TIME_ZONE_INFORMATION::default();
+    unsafe { windows::Win32::System::Time::GetTimeZoneInformation(&mut tz) };
+    utc_offset(-tz.Bias) + "  " + &time_zone()
+}
+/// "(UTC+05:30)" from minutes east of UTC.
+pub fn utc_offset(minutes: i32) -> String {
+    let sign = if minutes < 0 { '-' } else { '+' };
+    format!("(UTC{sign}{:02}:{:02})", minutes.abs() / 60, minutes.abs() % 60)
+}
+reg_switch!(tray_time, set_tray_time, ADV, "ShowSystrayDateTimeValueName", on = 1, off = 0, missing = true);
+
+// Wi-Fi
+fn wifi_list() -> Vec<crate::qsx::Item> {
+    crate::qsx::wifi_scan();
+    crate::qsx::wifi_networks().into_iter().map(|mut n| {
+        n.sub = format!("{}  |  signal {}%", n.sub, n.signal);
+        n.key = format!("wifi	{}", n.key); // not an app: no app icon is looked up for it
+        n
+    }).collect()
+}
+/// Connect (saved networks) or disconnect; a network without a saved password opens Windows' list.
+fn wifi_pick(_id: &str, name: &str) {
+    if let Some(n) = crate::qsx::wifi_networks().into_iter().find(|n| n.name == name) {
+        crate::qsx::wifi_connect(&n);
+        std::thread::sleep(std::time::Duration::from_secs(4)); // let it connect before the list is read again
+    }
+}
 
 // Storage
 reg_switch!(storage_sense, set_storage_sense, "Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy", "01", on = 1, off = 0, missing = false);
@@ -1281,13 +1378,13 @@ fn pages() -> Vec<Page> {
             r(0xE749, "Printers & scanners", "Preferences", Link("ms-settings:printers")),
             r(0xE1C9, "Mobile devices", "Instantly access your mobile devices from your PC", Link("ms-settings:mobile-devices")),
             r(0xE722, "Cameras", "Connected cameras, default image settings", Link("ms-settings:camera")),
-            r(0xE962, "Mouse", "Buttons, mouse pointer speed, scrolling", Link("ms-settings:mousetouchpad")),
+            r(0xE962, "Mouse", "Buttons, mouse pointer speed, scrolling", Sub("Mouse")),
             r(0xE962, "Mouse pointer speed", "", Slider(mouse_speed, set_mouse_speed)),
             r(0xEFA5, "Touchpad", "Taps, gestures, scrolling, zooming", Link("ms-settings:devices-touchpad")),
         ]),
         top("Network & internet", 0xE701, vec![
             r(0, "", "", NetHero(connection)),
-            r(0xE701, "Wi-Fi", "Connect, manage known networks, metered network", ToggleMore(wifi, set_wifi, "ms-settings:network-wifi")),
+            r(0xE701, "Wi-Fi", "Connect, manage known networks, metered network", Sub("Wi-Fi")),
             r(0xE839, "Ethernet", "Authentication, IP and DNS settings, metered network", Link("ms-settings:network-ethernet")),
             r(0xE705, "VPN", "Add, connect, manage", Link("ms-settings:network-vpn")),
             r(0xE704, "Mobile hotspot", "Share your internet connection", Link("ms-settings:network-mobilehotspot")),
@@ -1313,6 +1410,31 @@ fn pages() -> Vec<Page> {
             r(0xE790, "Choose your mode", "Change the colors that appear in Windows and your apps", Choice(color_mode, color_modes, set_color_mode)),
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
+        ]),
+        sub("Mouse", "Bluetooth & devices", vec![
+            r(0xE962, "Primary mouse button", "", Choice(primary_button, primary_buttons, set_primary_button)),
+            r(0xE962, "Mouse pointer speed", "", Slider(mouse_speed, set_mouse_speed)),
+            r(0xE7C9, "Enhance pointer precision", "", Toggle(precision, set_precision)),
+            r(0, "Scrolling", "", Header),
+            r(0xEC8F, "Lines to scroll at a time", "", Choice(wheel_lines, wheel_choices, set_wheel_lines)),
+            r(0xEC8F, "Scroll inactive windows when hovering over them", "", Toggle(scroll_inactive, set_scroll_inactive)),
+            r(0xE7C9, "Additional mouse settings", "Pointer schemes and more, in Windows' own page", Link("ms-settings:mousetouchpad")),
+        ]),
+        sub("Date & time", "Time & language", vec![
+            r(0xE823, "Date and time", "", Info(now_text)),
+            r(0xE823, "Set time automatically", "Your PC keeps its clock right using an internet time server", State(auto_time, "ms-settings:dateandtime")),
+            r(0xE909, "Set time zone automatically", "", State(auto_zone, "ms-settings:dateandtime")),
+            r(0xE909, "Time zone", "", Info(zone_text)),
+            r(0xE774, "Time server", "", Info(time_server)),
+            r(0xE823, "Show time and date in the System tray", "", Toggle(tray_time, set_tray_time)),
+            r(0xE787, "Change the time, time zone or sync now", "These need administrator rights: Windows' own page asks for them", Link("ms-settings:dateandtime")),
+        ]),
+        sub("Wi-Fi", "Network & internet", vec![
+            r(0xE701, "Wi-Fi", "", Toggle(wifi, set_wifi)),
+            r(0, "Available networks", "", Header),
+            r(0, "", "", Actions(wifi_list, "Connect", wifi_pick)),
+            r(0xE8F1, "Manage known networks", "Add, remove, and edit networks, in Windows' own page", Link("ms-settings:network-wifisettings")),
+            r(0xE7BA, "Hardware properties", "", Link("ms-settings:network-wifi")),
         ]),
         sub("Storage", "System", vec![
             r(0, "Drives", "", Header),
@@ -1385,7 +1507,7 @@ fn pages() -> Vec<Page> {
         ]),
         top("Time & language", 0xE775, vec![
             r(0, "", "", TimeHero(time_summary)),
-            r(SET | 0xE4AB, "Date & time", "Time zones, automatic clock settings, calendar display", Link("ms-settings:dateandtime")),
+            r(SET | 0xE4AB, "Date & time", "Time zones, automatic clock settings, calendar display", Sub("Date & time")),
             r(0xF2B7, "Language & region", "Windows display language, preferred languages, regional formats", Link("ms-settings:regionlanguage")),
             r(0xE144, "Typing", "Touch keyboard, text suggestions, preferences", Link("ms-settings:typing")),
             r(0xEFA9, "Speech", "Speech language, speech recognition microphone setup, voices", Link("ms-settings:speech")),
@@ -2124,6 +2246,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                     txt(name, &body, rect(c.left + 58.0, c.top + 15.0, c.right - 140.0, c.top + 37.0), &white);
                     txt(what, &small, rect(c.left + 58.0, c.top + 35.0, c.right - 140.0, c.top + 53.0), &dim);
                     if let Some(label) = button {
+                        let label = if label == "Connect" && *on { "Disconnect" } else { label };
                         // a quiet button at the right, like the buttons on Windows' own cards
                         let bx = rect(c.right - 112.0, c.top + 18.0, c.right - 16.0, c.top + 50.0);
                         rt.FillRoundedRectangle(&rrect(bx, 4.0), &b(if hover == Some(Hit::Sender(i, k)) { 0x3D3D3D } else { 0x373737 })?);
@@ -2742,6 +2865,16 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_and_time_labels() {
+        assert_eq!(wheel_label(1), "1 line");
+        assert_eq!(wheel_label(3), "3 lines");
+        assert_eq!(wheel_label(0xFFFF_FFFF), "One screen at a time");
+        assert_eq!(utc_offset(330), "(UTC+05:30)");
+        assert_eq!(utc_offset(-300), "(UTC-05:00)");
+        assert_eq!(utc_offset(0), "(UTC+00:00)");
+    }
 
     #[test]
     fn stored_choices_and_drive_lines() {
