@@ -212,42 +212,15 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let dc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
-            let bg = CreateSolidBrush(COLORREF(0x202020));
-            FillRect(dc, &rc, bg);
-            let _ = DeleteObject(bg.into());
-            let (hover, picked) = (HOVER.with(|c| c.get()), PICKED.with(|c| c.get()));
-            let edge = CreatePen(PS_SOLID, 1, COLORREF(0x5F5F5F)); // zones carry a thin lighter outline
-            let pen = SelectObject(dc, edge.into());
-            for (l, zones) in LAYOUTS.iter().enumerate() {
-                for (zi, z) in zones.iter().enumerate() {
-                    // colours are 0x00BBGGRR: accent for the zone under the mouse, lighter grey for a layout picked by number
-                    let colour = if hover == Some((l, zi)) { 0xFFC24C } else if picked == Some(l) || hover.is_some_and(|h| h.0 == l) { 0x606060 } else { 0x454545 };
-                    let brush = CreateSolidBrush(COLORREF(colour));
-                    let old = SelectObject(dc, brush.into());
-                    let r = tile_zone(l, *z);
-                    let _ = RoundRect(dc, (r.0 * s) as i32, (r.1 * s) as i32, (r.2 * s) as i32, (r.3 * s) as i32, (8.0 * s) as i32, (8.0 * s) as i32);
-                    SelectObject(dc, old);
-                    let _ = DeleteObject(brush.into());
-                }
+            // Direct2D into a buffer that keeps alpha: Windows' blurred panel material shows through
+            use windows::Win32::UI::Controls::{BeginBufferedPaint, EndBufferedPaint, BPBF_TOPDOWNDIB, BPPF_ERASE, BP_PAINTPARAMS};
+            let params = BP_PAINTPARAMS { cbSize: size_of::<BP_PAINTPARAMS>() as u32, dwFlags: BPPF_ERASE, ..Default::default() };
+            let mut mem = HDC::default();
+            let pb = BeginBufferedPaint(dc, &rc, BPBF_TOPDOWNDIB, Some(&params), &mut mem);
+            if !mem.is_invalid() {
+                let _ = draw_picker(mem, &rc, s, HOVER.with(|c| c.get()), PICKED.with(|c| c.get()));
+                let _ = EndBufferedPaint(pb, true);
             }
-            SelectObject(dc, pen);
-            let _ = DeleteObject(edge.into());
-            // each layout's number, on a small plate in the middle of its tile (press it, then the zone's number)
-            let font = CreateFontW(-(12.0 * s) as i32, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
-            let old = SelectObject(dc, font.into());
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, COLORREF(0xFFFFFF));
-            let plate = CreateSolidBrush(COLORREF(0x6B6B6B));
-            for l in 0..LAYOUTS.len() {
-                let (cx, cy) = (PAD + (l % 3) as f32 * (TILE_W + GAP) + TILE_W / 2.0, PAD + (l / 3) as f32 * (TILE_H + GAP) + TILE_H / 2.0);
-                let mut r = RECT { left: ((cx - 7.0) * s) as i32, top: ((cy - 12.0) * s) as i32, right: ((cx + 7.0) * s) as i32, bottom: ((cy + 12.0) * s) as i32 };
-                FillRect(dc, &r, plate);
-                let mut digit = [b'1' as u16 + l as u16];
-                DrawTextW(dc, &mut digit, &mut r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-            }
-            let _ = DeleteObject(plate.into());
-            SelectObject(dc, old);
-            let _ = DeleteObject(font.into());
             let _ = EndPaint(hwnd, &ps);
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
@@ -342,6 +315,45 @@ pub unsafe fn on_key(k: &KBDLLHOOKSTRUCT, up: bool) -> bool {
     true
 }
 
+/// The picker: Windows' layouts as tiles of zones; the zone under the mouse in the accent colour,
+/// the layout under the mouse (or chosen by number) a step lighter, each layout's number on a plate.
+unsafe fn draw_picker(dc: HDC, rc: &RECT, s: f32, hover: Option<(usize, usize)>, picked: Option<usize>) -> windows::core::Result<()> {
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use crate::flyout::{rect, rrect, utf16};
+    use crate::quick::rgb;
+    let f: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+    let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, ..Default::default() };
+    let rt = f.CreateDCRenderTarget(&props)?;
+    rt.BindDC(dc, rc)?;
+    rt.SetDpi(96.0 * s, 96.0 * s);
+    let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let num = dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0, w!(""))?;
+    num.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+    num.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+    let b = |c: u32| rt.CreateSolidColorBrush(&rgb(c), None);
+    rt.BeginDraw();
+    rt.Clear(Some(&crate::flyout::base(rgb(0x202020))));
+    for (l, zones) in LAYOUTS.iter().enumerate() {
+        for (zi, z) in zones.iter().enumerate() {
+            let colour = if hover == Some((l, zi)) { 0x4CC2FF } else if picked == Some(l) || hover.is_some_and(|h| h.0 == l) { 0x606060 } else { 0x454545 };
+            let r = tile_zone(l, *z);
+            let zr = rect(r.0, r.1, r.2, r.3);
+            rt.FillRoundedRectangle(&rrect(zr, 4.0), &b(colour)?);
+            rt.DrawRoundedRectangle(&rrect(rect(r.0 + 0.5, r.1 + 0.5, r.2 - 0.5, r.3 - 0.5), 4.0), &b(0x5F5F5F)?, 1.0, None);
+        }
+    }
+    for l in 0..LAYOUTS.len() {
+        let (cx, cy) = (PAD + (l % 3) as f32 * (TILE_W + GAP) + TILE_W / 2.0, PAD + (l / 3) as f32 * (TILE_H + GAP) + TILE_H / 2.0);
+        let plate = rect(cx - 7.0, cy - 12.0, cx + 7.0, cy + 12.0);
+        rt.FillRoundedRectangle(&rrect(plate, 2.0), &b(0x6B6B6B)?);
+        rt.DrawText(&utf16(&(l + 1).to_string()), &num, &plate, &b(0xFFFFFF)?, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+    }
+    rt.EndDraw(None, None)
+}
+
 pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst, lpszClassName: w!("shellbits_snap"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
     RegisterClassW(&wc);
@@ -349,6 +361,7 @@ pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let (dark, round) = (1u32, 2u32);
     let _ = DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
     let _ = DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const c_void, 4);
+    let _ = crate::fluent_window(h); // Windows' blurred panel material
     SNAP.store(h.0 as isize, Relaxed);
     let wc = WNDCLASSW { lpfnWndProc: Some(assist_proc), hInstance: inst, lpszClassName: w!("shellbits_assist"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
     RegisterClassW(&wc);
