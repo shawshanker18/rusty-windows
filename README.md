@@ -24,9 +24,16 @@ Measured on one Windows 11 PC (build 26300, 1080p), private memory. The 355 MB f
 1080p video wallpaper and the two Windows hosts that still load as the shell (SearchHost, ShellHost).
 Your numbers will differ. Measure yours with `scripts/mem-probe.ps1` and tell us.
 
-## What is in it
+## Side by side
 
-<p align="center"><img src="assets/calc.png" alt="The Rust Calculator" width="70%"></p>
+Windows on the left, Rusty Windows on the right, captured on the same PC.
+
+<p align="center"><img src="assets/flyouts.png" alt="Windows 11 flyouts next to their Rust versions: Quick Settings, calendar, notification center, Start, snap layouts and system tray" width="85%"></p>
+
+Not yet captured side by side: Alt+Tab, Task View, Win+X, Run, clipboard history, the emoji panel
+and the volume and media flyouts.
+
+## What is in it
 
 - **Shell:** taskbar, Start and Search launcher, system tray, Quick Settings (Wi-Fi, Bluetooth, sound
   output, accessibility, performance pages), notification center with calendar, toasts, media card,
@@ -53,6 +60,13 @@ cargo build --release
 
 That runs it next to Explorer, which is the safe way to try it. Making it your actual shell, the
 shortcuts and the way back are in [SETUP.md](SETUP.md).
+
+## The goal
+
+Rewrite in Rust everything on a Windows PC that can be replaced without reflashing the firmware:
+the whole shell, every built-in app and dialog, the system components behind them and, in the long
+run, the parts loaded from disk at boot. The full list, with status and difficulty for each item,
+is in [GOALS.md](GOALS.md).
 
 ## Honest status
 
