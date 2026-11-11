@@ -593,7 +593,10 @@ unsafe fn draw_qs(st: &State, g: &Gfx) -> windows::core::Result<()> {
     icon(0xE76C, &g.icon12, rect(328.0, VOL_Y - 12.0, 342.0, VOL_Y + 12.0), &white);
 
     // footer
-    rt.FillRectangle(&rect(0.0, FOOT_Y, W, H), &brush(C_FOOT)?);
+    // live: a light shade over the see-through panel (Windows' footer is a few levels darker than the
+    // body and tinted by what is behind); snapshots have no backdrop, so the flat colour stands in
+    let foot = if crate::flyout::LIVE.load(Relaxed) { D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.10 } } else { C_FOOT };
+    rt.FillRectangle(&rect(0.0, FOOT_Y, W, H), &brush(foot)?);
     let fy = FOOT_Y + 24.0;
     if let Some((pct, charging)) = s.battery {
         let (bx, by) = (26.0, fy - 5.5);

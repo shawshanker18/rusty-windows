@@ -221,7 +221,16 @@ fn refresh(st: &mut State) {
 
 // ======================= layout =======================
 
+/// Taskbar settings Windows keeps for this user (the same ones Settings > Taskbar changes).
+fn adv(name: windows::core::PCWSTR) -> Option<u32> {
+    crate::qsx::reg_dword(w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"), name)
+}
+
+/// Where the Start button goes: centred with the apps, or at the left edge ("Taskbar alignment: Left").
 fn center_x(st: &State, w: f32) -> f32 {
+    if adv(w!("TaskbarAl")) == Some(0) {
+        return 12.0;
+    }
     let total = START_W + GAP + SEARCH_W + GAP + APP_W * st.apps.len() as f32;
     ((w - total) / 2.0).round()
 }
@@ -274,7 +283,8 @@ fn clock_text() -> (String, String) {
         let st = windows::Win32::System::SystemInformation::GetLocalTime();
         let h12 = match st.wHour % 12 { 0 => 12, h => h };
         let ampm = if st.wHour < 12 { "AM" } else { "PM" };
-        (format!("{h12}:{:02} {ampm}", st.wMinute), format!("{}/{}/{}", st.wMonth, st.wDay, st.wYear))
+        let secs = if adv(w!("ShowSecondsInSystemClock")) == Some(1) { format!(":{:02}", st.wSecond) } else { String::new() };
+        (format!("{h12}:{:02}{secs} {ampm}", st.wMinute), format!("{}/{}/{}", st.wMonth, st.wDay, st.wYear))
     }
 }
 
