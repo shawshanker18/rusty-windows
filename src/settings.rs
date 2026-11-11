@@ -62,6 +62,7 @@ enum Kind {
     AccountHero(fn() -> Vec<(String, String, bool, String)>), // picture, name, email and account type at the top of Accounts
     SortBy,                                // "Sort by:" with its drop-down, above the app list
     Senders(fn() -> Vec<crate::qsx::Item>, fn(&str, bool)), // one card per item, each with its own switch: the list, and what flipping one does
+    Actions(fn() -> Vec<crate::qsx::Item>, &'static str, fn(&str, &str)), // one card per item with a button: the list, the button's text, what it does (item id, item name)
     Devices(fn() -> Vec<crate::qsx::Item>, &'static str), // sound devices to pick from, then a "pair a new device" line with this label
 }
 
@@ -183,8 +184,8 @@ fn senders() -> Vec<crate::qsx::Item> {
 }
 /// Where a list item's icon comes from: a startup entry names its program, anything else is an app id.
 fn icon_source(id: &str) -> String {
-    match id.strip_prefix("startup\t").and_then(|r| r.split('\t').next()) {
-        Some(exe) => exe.to_string(),
+    match id.split('\t').nth(1).filter(|_| id.starts_with("startup\t") || id.starts_with("app\t")) {
+        Some(file) => file.to_string(),
         None => format!("shell:AppsFolder\\{id}"),
     }
 }
@@ -276,6 +277,99 @@ fn set_startup(id: &str, on: bool) {
     rec[0] = if on { 2 } else { 3 };
     unsafe {
         let _ = RegSetKeyValueW(root, &HSTRING::from(format!("{APPROVED}\\{list}")), &HSTRING::from(name), REG_BINARY.0, Some(rec.as_ptr() as *const c_void), 12);
+    }
+}
+
+const UNINSTALL: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+const UNINSTALL32: &str = "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+
+/// The second line of an app's card, like Windows': "1.2.3  |  Publisher  |  12/31/2026  |  45.2 MB",
+/// leaving out whatever the app did not record. `date` is the registry's YYYYMMDD.
+pub fn app_line(version: &str, publisher: &str, date: &str, size_kb: u32) -> String {
+    let mut parts: Vec<String> = [version, publisher].iter().filter(|p| !p.trim().is_empty()).map(|p| p.trim().to_string()).collect();
+    if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) {
+        parts.push(format!("{}/{}/{}", date[4..6].trim_start_matches('0'), date[6..8].trim_start_matches('0'), &date[..4]));
+    }
+    if size_kb >= 512 { // smaller than half a megabyte would read "0 MB"
+        parts.push(size_label(size_kb as u64 * 1024));
+    }
+    parts.join("  |  ")
+}
+
+/// The command that removes an app. Windows Installer entries are recorded as "install/repair"
+/// (`MsiExec.exe /I{...}`); removing is the same command with /X.
+pub fn uninstall_command(recorded: &str) -> String {
+    let c = recorded.trim();
+    if c.to_lowercase().starts_with("msiexec") { c.replacen("/I{", "/X{", 1).replacen("/i{", "/X{", 1) } else { c.to_string() }
+}
+
+/// A DisplayIcon value as a file: `"C:\x.exe",0` -> `C:\x.exe`.
+pub fn icon_file(display_icon: &str) -> String {
+    let t = display_icon.trim().trim_matches('"');
+    match t.rsplit_once(',') {
+        Some((file, index)) if index.trim().trim_start_matches('-').bytes().all(|b| b.is_ascii_digit()) => file.trim().trim_matches('"').to_string(),
+        _ => t.to_string(),
+    }
+}
+
+/// The programs Windows lists under Installed apps, from its uninstall records (this user's and the
+/// PC's, 64- and 32-bit), without system components and patches, by name.
+// ponytail: Store (packaged) apps are not listed yet; they come from the package manager, not these records
+fn installed_apps() -> Vec<crate::qsx::Item> {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    let mut out: Vec<crate::qsx::Item> = Vec::new();
+    unsafe {
+        for (root, base) in [(HKEY_LOCAL_MACHINE, UNINSTALL), (HKEY_LOCAL_MACHINE, UNINSTALL32), (HKEY_CURRENT_USER, UNINSTALL)] {
+            let mut k = HKEY::default();
+            if RegOpenKeyExW(root, &HSTRING::from(base), Some(0), KEY_READ, &mut k).is_err() {
+                continue;
+            }
+            for i in 0.. {
+                let mut name = [0u16; 512];
+                let mut n = name.len() as u32;
+                if RegEnumKeyExW(k, i, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut n, None, None, None, None).is_err() {
+                    break;
+                }
+                let key = HSTRING::from(format!("{base}\\{}", String::from_utf16_lossy(&name[..n as usize])));
+                let text = |v: PCWSTR| reg_str(root, PCWSTR(key.as_ptr()), v);
+                let num = |v: PCWSTR| reg_u32(root, PCWSTR(key.as_ptr()), v).unwrap_or(0);
+                let (title, remove) = (text(w!("DisplayName")), text(w!("UninstallString")));
+                if title.is_empty() || remove.is_empty() || num(w!("SystemComponent")) == 1 || !text(w!("ParentKeyName")).is_empty() || out.iter().any(|a| a.name == title) {
+                    continue;
+                }
+                out.push(crate::qsx::Item {
+                    sub: app_line(&text(w!("DisplayVersion")), &text(w!("Publisher")), &text(w!("InstallDate")), num(w!("EstimatedSize"))),
+                    key: format!("app\t{}\t{}", icon_file(&text(w!("DisplayIcon"))), uninstall_command(&remove)),
+                    name: title,
+                    ..Default::default()
+                });
+            }
+            let _ = RegCloseKey(k);
+        }
+    }
+    out.sort_by_key(|a| a.name.to_lowercase());
+    out
+}
+
+/// Uninstall: ask first (as Windows does), then start the app's own uninstaller, which shows its own steps.
+fn uninstall_app(id: &str, name: &str) {
+    use windows::Win32::System::Threading::{CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW};
+    let Some(command) = id.split('\t').nth(2).filter(|c| !c.is_empty()) else { return };
+    unsafe {
+        let ask = HSTRING::from(format!("This app and its related info will be uninstalled.\n\n{name}"));
+        if MessageBoxW(None, &ask, w!("Uninstall"), MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND) != IDOK {
+            return;
+        }
+        let mut cmd: Vec<u16> = command.encode_utf16().chain([0]).collect();
+        let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+        let mut pi = PROCESS_INFORMATION::default();
+        if CreateProcessW(None, Some(windows::core::PWSTR(cmd.as_mut_ptr())), None, None, false, PROCESS_CREATION_FLAGS(0), None, None, &si, &mut pi).is_ok() {
+            let _ = CloseHandle(pi.hThread);
+            let _ = CloseHandle(pi.hProcess);
+        } else {
+            // uninstallers that need administrator rights cannot be started this way: let the shell ask
+            windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), w!("cmd.exe"), &HSTRING::from(format!("/c {command}")), PCWSTR::null(), SW_HIDE);
+        }
     }
 }
 
@@ -1064,12 +1158,15 @@ fn pages() -> Vec<Page> {
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
         ]),
+        sub("Installed apps", "Apps", vec![
+            r(0, "", "", Actions(installed_apps, "Uninstall", uninstall_app)),
+        ]),
         sub("Startup", "Apps", vec![
             r(0, "Startup apps", "", Header),
             r(0, "", "", Senders(startup_apps, set_startup)),
         ]),
         top("Apps", 0xE71D, vec![
-            r(0xE71D, "Installed apps", "Uninstall and manage apps on your PC", Link("ms-settings:appsfeatures")),
+            r(0xE71D, "Installed apps", "Uninstall and manage apps on your PC", Sub("Installed apps")),
             r(SET | 0xEFDD, "Advanced app settings", "Choose where to get apps, archive apps, uninstall updates", Link("ms-settings:appsfeatures-app")),
             r(SET | 0xE42A, "Default apps", "Defaults for file and link types, other defaults", Link("ms-settings:defaultapps")),
             r(0xF277, "Actions", "Windows can recommend actions from these apps.", Link("ms-settings:appactions")),
@@ -1248,6 +1345,7 @@ fn read_value(k: Kind) -> Val {
         Kind::When(shown, _) => Val { list: if shown() { vec![Default::default()] } else { Vec::new() }, ..Default::default() },
         Kind::Tiles(get) | Kind::Facts(get) | Kind::ThemeHero(get) | Kind::TimeHero(get) | Kind::HomeHero(get) | Kind::AccountHero(get) => Val { list: get(), ..Default::default() },
         Kind::BtTiles(get) => Val { list: get().into_iter().map(|d| (d.name, String::new(), d.on, d.key)).collect(), ..Default::default() },
+        Kind::Actions(get, ..) => Val { list: get().into_iter().map(|d| (d.name, d.sub, d.on, d.key)).collect(), ..Default::default() },
         Kind::Senders(get, _) => Val {
             list: get().into_iter().map(|d| (d.name, if !d.sub.is_empty() { d.sub } else if d.on { "Banners, Sounds".to_string() } else { "Off".to_string() }, d.on, d.key)).collect(),
             ..Default::default()
@@ -1314,7 +1412,7 @@ fn row_height(k: Kind, i: usize, counts: &[usize]) -> f32 {
         Kind::Big(_) => 95.0,
         Kind::Toggle(..) | Kind::ToggleMore(..) | Kind::State(..) => ROW_H + 0.67, // cards holding a switch are two thirds of a pixel taller in Settings
         Kind::Note(..) => if counts.get(i).copied().unwrap_or(0) > 0 { 52.0 } else { -4.0 },
-        Kind::Senders(..) => (73.0 * counts.get(i).copied().unwrap_or(0) as f32 - 5.0).max(0.0),
+        Kind::Senders(..) | Kind::Actions(..) => (73.0 * counts.get(i).copied().unwrap_or(0) as f32 - 5.0).max(0.0),
         _ => ROW_H,
     }
 }
@@ -1811,7 +1909,8 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                 hits.push((bx, Hit::Sort));
                 continue;
             }
-            if let Kind::Senders(..) = row.kind {
+            if let Kind::Senders(..) | Kind::Actions(..) = row.kind {
+                let button = if let Kind::Actions(_, label, _) = row.kind { Some(label) } else { None };
                 let list = ui.vals.get(i).map(|v| v.list.clone()).unwrap_or_default();
                 let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
                 for (k, (name, what, on, id)) in list.iter().enumerate() {
@@ -1829,6 +1928,18 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                     }
                     txt(name, &body, rect(c.left + 58.0, c.top + 15.0, c.right - 140.0, c.top + 37.0), &white);
                     txt(what, &small, rect(c.left + 58.0, c.top + 35.0, c.right - 140.0, c.top + 53.0), &dim);
+                    if let Some(label) = button {
+                        // a quiet button at the right, like the buttons on Windows' own cards
+                        let bx = rect(c.right - 112.0, c.top + 18.0, c.right - 16.0, c.top + 50.0);
+                        rt.FillRoundedRectangle(&rrect(bx, 4.0), &b(if hover == Some(Hit::Sender(i, k)) { 0x3D3D3D } else { 0x373737 })?);
+                        rt.DrawRoundedRectangle(&rrect(rect(bx.left + 0.5, bx.top + 0.5, bx.right - 0.5, bx.bottom - 0.5), 4.0), &b(0x424242)?, 1.0, None);
+                        let mid = dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0, w!(""))?;
+                        mid.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                        mid.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                        txt(label, &mid, bx, &white);
+                        hits.push((bx, Hit::Sender(i, k)));
+                        continue;
+                    }
                     txt(if *on { "On" } else { "Off" }, &right, rect(c.right - 190.0, c.top, c.right - 96.0, c.bottom), &white);
                     crate::quick::switch(&rt, c.right - 84.0, c.top + 24.0, *on)?;
                     ico(0xE76C, &icons12, rect(c.right - 36.0, c.top, c.right - 12.0, c.bottom), &white);
@@ -1923,7 +2034,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                     continue;
                 }
                 Kind::HomeHero(_) | Kind::AccountHero(_) | Kind::UpdateHero(_) | Kind::When(..) | Kind::TimeHero(_) | Kind::ThemeHero(_) | Kind::NetHero(_) | Kind::BtTiles(_) | Kind::Center(..) | Kind::Space(_) => {}
-                Kind::Header | Kind::Section | Kind::SortBy | Kind::Senders(..) | Kind::Big(_) | Kind::Note(..) | Kind::Tiles(_) | Kind::Facts(_) | Kind::RenamePc => {}
+                Kind::Header | Kind::Section | Kind::SortBy | Kind::Senders(..) | Kind::Actions(..) | Kind::Big(_) | Kind::Note(..) | Kind::Tiles(_) | Kind::Facts(_) | Kind::RenamePc => {}
                 Kind::Devices(_, pair) => {
                     let line = b(0x1D1D1D)?;
                     let inner = b(0x272727)?;
@@ -2234,6 +2345,16 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     BY_NAME.store(!BY_NAME.load(Relaxed), Relaxed);
                     load(UI.with(|u| u.borrow().page));
                 }
+                Some(Hit::Sender(i, k)) if matches!(pages().get(UI.with(|u| u.borrow().page)).and_then(|p| p.rows.get(i)).map(|r| r.kind), Some(Kind::Actions(..))) => {
+                    // a card's button: do its action for that item, then read the list again
+                    let (page, item) = UI.with(|u| { let ui = u.borrow(); (ui.page, ui.vals.get(i).and_then(|v| v.list.get(k)).map(|d| (d.3.clone(), d.0.clone()))) });
+                    if let (Some((id, name)), Some(Kind::Actions(_, _, act))) = (item, pages().get(page).and_then(|p| p.rows.get(i)).map(|r| r.kind)) {
+                        std::thread::spawn(move || {
+                            act(&id, &name);
+                            load(page);
+                        });
+                    }
+                }
                 Some(Hit::Sender(i, k)) => {
                     let (page, app) = UI.with(|u| {
                         let mut ui = u.borrow_mut();
@@ -2426,6 +2547,18 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_app_records() {
+        assert_eq!(app_line("1.2.3", "Acme", "20261105", 2048), "1.2.3  |  Acme  |  11/5/2026  |  2 MB");
+        assert_eq!(app_line("", "Acme", "", 0), "Acme");
+        assert_eq!(app_line("7", "", "2026", 0), "7"); // a date that is not YYYYMMDD is left out
+        assert_eq!(uninstall_command("MsiExec.exe /I{ABC-1}"), "MsiExec.exe /X{ABC-1}");
+        assert_eq!(uninstall_command(r#""C:\P F\unins000.exe" /SILENT"#), r#""C:\P F\unins000.exe" /SILENT"#);
+        assert_eq!(icon_file(r#""C:\P F\app.exe",0"#), r"C:\P F\app.exe");
+        assert_eq!(icon_file(r"C:\a,b\app.ico"), r"C:\a,b\app.ico"); // a comma that is part of the path
+        assert_eq!(icon_source("app\tC:/x.ico\tC:/unins.exe"), "C:/x.ico");
+    }
 
     #[test]
     fn startup_records_and_commands() {
