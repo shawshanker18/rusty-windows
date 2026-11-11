@@ -586,6 +586,103 @@ fn wifi_pick(_id: &str, name: &str) {
     }
 }
 
+// Background
+fn wallpaper_now() -> String {
+    let mut buf = [0u16; 520];
+    unsafe { let _ = SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, Some(buf.as_mut_ptr() as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    String::from_utf16_lossy(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(0)])
+}
+fn wallpaper_text() -> String {
+    let p = wallpaper_now();
+    if p.is_empty() { "Solid color".into() } else { std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(p) }
+}
+fn set_wallpaper(path: &str) {
+    let w: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    unsafe { let _ = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(w.as_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); }
+}
+/// The pictures you used recently (Windows keeps five), the current one first.
+fn recent_wallpapers() -> Vec<crate::qsx::Item> {
+    let now = wallpaper_now().to_lowercase();
+    let mut out: Vec<crate::qsx::Item> = Vec::new();
+    for i in 0..5 {
+        let p = reg_str(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Wallpapers"), PCWSTR(HSTRING::from(format!("BackgroundHistoryPath{i}")).as_ptr()));
+        if p.is_empty() || !std::path::Path::new(&p).exists() || out.iter().any(|o| o.key.ends_with(&p)) {
+            continue;
+        }
+        let on = p.to_lowercase() == now;
+        let name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(p.clone());
+        out.push(crate::qsx::Item { name, sub: if on { "Current background".into() } else { p.clone() }, on, key: format!("app\t{p}\t{p}"), ..Default::default() });
+    }
+    out
+}
+fn use_wallpaper(id: &str, _name: &str) {
+    if let Some(p) = id.split('\t').nth(2) {
+        set_wallpaper(p);
+    }
+}
+/// "Choose a fit": Windows stores it as two numbers (WallpaperStyle, TileWallpaper).
+const FITS: [(&str, &str, &str); 6] = [("Fill", "10", "0"), ("Fit", "6", "0"), ("Stretch", "2", "0"), ("Tile", "0", "1"), ("Center", "0", "0"), ("Span", "22", "0")];
+pub fn fit_index(style: &str, tile: &str) -> usize {
+    FITS.iter().position(|f| f.1 == style.trim() && f.2 == tile.trim()).unwrap_or(0)
+}
+fn fit() -> String {
+    let k = w!("Control Panel\\Desktop");
+    FITS[fit_index(&reg_str(HKEY_CURRENT_USER, k, w!("WallpaperStyle")), &reg_str(HKEY_CURRENT_USER, k, w!("TileWallpaper")))].0.to_string()
+}
+fn fits() -> Vec<String> {
+    FITS.iter().map(|f| f.0.to_string()).collect()
+}
+fn set_fit(i: usize) {
+    let Some(f) = FITS.get(i) else { return };
+    for (name, v) in [("WallpaperStyle", f.1), ("TileWallpaper", f.2)] {
+        let w: Vec<u16> = v.encode_utf16().chain([0]).collect();
+        unsafe { let _ = RegSetKeyValueW(HKEY_CURRENT_USER, w!("Control Panel\\Desktop"), &HSTRING::from(name), REG_SZ.0, Some(w.as_ptr() as *const c_void), (w.len() * 2) as u32); }
+    }
+    set_wallpaper(&wallpaper_now()); // setting the same picture again makes Windows redraw it with the new fit
+}
+fn video_wallpaper() -> String {
+    match crate::wallpaper::video_path() {
+        Some(p) => format!("Playing {}", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+        None => "None - put wallpaper.mp4 next to shellbits.exe".into(),
+    }
+}
+
+// Themes
+fn theme_list() -> Vec<crate::qsx::Item> {
+    themes().into_iter().map(|(path, _wall, on, look)| {
+        let name = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mode = if look.starts_with("dark") { "Dark mode" } else { "Light mode" };
+        crate::qsx::Item { name: theme_name(&name), sub: if on { format!("{mode}  |  in use") } else { mode.into() }, on, key: format!("app\t{path}\t{path}"), ..Default::default() }
+    }).collect()
+}
+/// File names of Windows' own themes as Settings shows them: "aero" -> "Windows (light)".
+pub fn theme_name(file: &str) -> String {
+    match file.to_lowercase().as_str() {
+        "aero" => "Windows (light)".into(),
+        "dark" => "Windows (dark)".into(),
+        "spotlight" => "Windows spotlight".into(),
+        "themea" => "Glow".into(),
+        "themeb" => "Captured Motion".into(),
+        "themec" => "Sunrise".into(),
+        "themed" => "Flow".into(),
+        other => { let mut c = other.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }
+    }
+}
+/// Opening a .theme file is how Windows applies a theme.
+fn apply_theme_file(id: &str, _name: &str) {
+    if let Some(p) = id.split('\t').nth(2) {
+        unsafe { windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &HSTRING::from(p), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL); }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+// Lock screen
+reg_switch!(lock_tips, set_lock_tips, "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "RotatingLockScreenOverlayEnabled", on = 1, off = 0, missing = true);
+fn lock_background() -> String {
+    let spotlight = hkcu_u32("Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "RotatingLockScreenEnabled") != Some(0);
+    if spotlight { "Windows spotlight".into() } else { "Picture".into() }
+}
+
 // Storage
 reg_switch!(storage_sense, set_storage_sense, "Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy", "01", on = 1, off = 0, missing = false);
 
@@ -1395,11 +1492,11 @@ fn pages() -> Vec<Page> {
         ]),
         top("Personalization", 0xE771, vec![
             r(0, "", "", ThemeHero(themes)),
-            r(0xEB9F, "Background", "Background image, color, slideshow", Link("ms-settings:personalization-background")),
+            r(0xEB9F, "Background", "Background image, color, slideshow", Sub("Background")),
             r(0xE790, "Colors", "Accent color, transparency effects, color theme", Sub("Colors")),
-            r(0xE771, "Themes", "Install, create, manage", Link("ms-settings:themes")),
+            r(0xE771, "Themes", "Install, create, manage", Sub("Themes")),
             r(SET | 0xF431, "Dynamic Lighting", "Connected devices, effects, app settings", Link("ms-settings:personalization-lighting")),
-            r(0xEE3F, "Lock screen", "Lock screen images, apps, animations", Link("ms-settings:lockscreen")),
+            r(0xEE3F, "Lock screen", "Lock screen images, apps, animations", Sub("Lock screen")),
             r(0xE144, "Text input", "Touch keyboard, voice typing, emoji and more, input method editor", Link("ms-settings:personalization-textinput")),
             r(0xE8FC, "Start", "Recent apps and items, folders", Sub("Start")),
             r(0xE90E, "Taskbar", "Taskbar behaviors, system pins", Sub("Taskbar")),
@@ -1410,6 +1507,25 @@ fn pages() -> Vec<Page> {
             r(0xE790, "Choose your mode", "Change the colors that appear in Windows and your apps", Choice(color_mode, color_modes, set_color_mode)),
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
+        ]),
+        sub("Background", "Personalization", vec![
+            r(0xEB9F, "Current picture", "", Info(wallpaper_text)),
+            r(0xE9A6, "Choose a fit for your desktop image", "", Choice(fit, fits, set_fit)),
+            r(0, "Recent images", "", Header),
+            r(0, "", "", Actions(recent_wallpapers, "Use", use_wallpaper)),
+            r(0, "Rust UI", "", Header),
+            r(0xE714, "Video wallpaper", "Rust UI plays this over the picture above", Info(video_wallpaper)),
+            r(0xE8B9, "Browse photos, solid color or slideshow", "In Windows' own page", Link("ms-settings:personalization-background")),
+        ]),
+        sub("Themes", "Personalization", vec![
+            r(0, "Windows themes", "", Header),
+            r(0, "", "", Actions(theme_list, "Apply", apply_theme_file)),
+            r(0xE771, "Get more themes from the Microsoft Store", "", Link("ms-windows-store://collection?CollectionId=WindowsThemes")),
+        ]),
+        sub("Lock screen", "Personalization", vec![
+            r(0xEE3F, "Personalize your lock screen", "", Info(lock_background)),
+            r(0xE82F, "Get fun facts, tips, tricks, and more on your lock screen", "", Toggle(lock_tips, set_lock_tips)),
+            r(0xEE3F, "Change the picture, status and sign-in screen", "In Windows' own page", Link("ms-settings:lockscreen")),
         ]),
         sub("Mouse", "Bluetooth & devices", vec![
             r(0xE962, "Primary mouse button", "", Choice(primary_button, primary_buttons, set_primary_button)),
@@ -2865,6 +2981,17 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fits_and_theme_names() {
+        assert_eq!(FITS[fit_index("10", "0")].0, "Fill");
+        assert_eq!(FITS[fit_index("0", "1")].0, "Tile");
+        assert_eq!(FITS[fit_index("22", "0")].0, "Span");
+        assert_eq!(FITS[fit_index("", "")].0, "Fill"); // nothing stored
+        assert_eq!(theme_name("aero"), "Windows (light)");
+        assert_eq!(theme_name("themeA"), "Glow");
+        assert_eq!(theme_name("custom"), "Custom");
+    }
 
     #[test]
     fn mouse_and_time_labels() {
