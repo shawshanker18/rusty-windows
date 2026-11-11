@@ -61,7 +61,7 @@ enum Kind {
     HomeHero(fn() -> Vec<(String, String, bool, String)>),    // this PC, its connection and update state, across the top of Home
     AccountHero(fn() -> Vec<(String, String, bool, String)>), // picture, name, email and account type at the top of Accounts
     SortBy,                                // "Sort by:" with its drop-down, above the app list
-    Senders(fn() -> Vec<crate::qsx::Item>), // one card per app that sends notifications, each with its own switch
+    Senders(fn() -> Vec<crate::qsx::Item>, fn(&str, bool)), // one card per item, each with its own switch: the list, and what flipping one does
     Devices(fn() -> Vec<crate::qsx::Item>, &'static str), // sound devices to pick from, then a "pair a new device" line with this label
 }
 
@@ -181,6 +181,104 @@ fn senders() -> Vec<crate::qsx::Item> {
             .collect()
     }
 }
+/// Where a list item's icon comes from: a startup entry names its program, anything else is an app id.
+fn icon_source(id: &str) -> String {
+    match id.strip_prefix("startup\t").and_then(|r| r.split('\t').next()) {
+        Some(exe) => exe.to_string(),
+        None => format!("shell:AppsFolder\\{id}"),
+    }
+}
+
+const RUN: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const APPROVED: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved";
+
+/// Windows' "is this startup item switched on" record: 12 bytes whose first byte is even when it is
+/// on (02, 06) and odd when it was switched off (03, 07). No record at all means on.
+pub fn startup_on(record: &[u8]) -> bool {
+    record.first().is_none_or(|b| b & 1 == 0)
+}
+
+/// The program a startup command line starts: `"C:\a b\x.exe" --flag` -> `C:\a b\x.exe`.
+pub fn exe_of(command: &str) -> String {
+    let c = command.trim();
+    if let Some(rest) = c.strip_prefix('"') {
+        return rest.split('"').next().unwrap_or("").to_string();
+    }
+    match c.to_lowercase().find(".exe") {
+        Some(i) => c[..i + 4].to_string(),
+        None => c.split_whitespace().next().unwrap_or("").to_string(),
+    }
+}
+
+unsafe fn reg_values(root: HKEY, key: &str) -> Vec<(String, String)> {
+    use windows::Win32::System::Registry::RegEnumValueW;
+    let mut out = Vec::new();
+    let mut k = HKEY::default();
+    if RegOpenKeyExW(root, &HSTRING::from(key), Some(0), KEY_READ, &mut k).is_err() {
+        return out;
+    }
+    for i in 0.. {
+        let (mut name, mut data) = ([0u16; 512], [0u8; 4096]);
+        let (mut n, mut d) = (name.len() as u32, data.len() as u32);
+        if RegEnumValueW(k, i, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut n, None, None, Some(data.as_mut_ptr()), Some(&mut d)).is_err() {
+            break;
+        }
+        let text: Vec<u16> = data[..d as usize].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|c| *c != 0).collect();
+        out.push((String::from_utf16_lossy(&name[..n as usize]), String::from_utf16_lossy(&text)));
+    }
+    let _ = RegCloseKey(k);
+    out
+}
+
+unsafe fn approved(root: HKEY, list: &str, name: &str) -> bool {
+    use windows::Win32::System::Registry::RRF_RT_REG_BINARY;
+    let (mut rec, mut n) = ([0u8; 16], 16u32);
+    let found = RegGetValueW(root, &HSTRING::from(format!("{APPROVED}\\{list}")), &HSTRING::from(name), RRF_RT_REG_BINARY, None, Some(rec.as_mut_ptr() as *mut c_void), Some(&mut n)).is_ok();
+    startup_on(if found { &rec[..n as usize] } else { &[] })
+}
+
+/// What starts when you sign in: your own Run entries, your Startup folder, and the PC-wide Run
+/// entries, each with Windows' own on/off record (the one Task Manager and Settings flip).
+// ponytail: packaged (Store) apps' startup tasks are not listed; they need the StartupTask API per package
+fn startup_apps() -> Vec<crate::qsx::Item> {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    let mut out = Vec::new();
+    unsafe {
+        for (root, tag, note) in [(HKEY_CURRENT_USER, "cu", ""), (HKEY_LOCAL_MACHINE, "lm", "All users")] {
+            for (name, command) in reg_values(root, RUN) {
+                let on = approved(root, "Run", &name);
+                let sub = match (on, note) { (true, "") => "On".to_string(), (false, "") => "Off".to_string(), (true, n) => format!("On - {n}"), (false, n) => format!("Off - {n}") };
+                out.push(crate::qsx::Item { key: format!("startup\t{}\t{tag}:{name}", exe_of(&command)), name, sub, on, ..Default::default() });
+            }
+        }
+        let folder = format!("{}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", std::env::var("APPDATA").unwrap_or_default());
+        for f in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let file = f.file_name().to_string_lossy().to_string();
+            if file.eq_ignore_ascii_case("desktop.ini") || f.path().is_dir() {
+                continue;
+            }
+            let on = approved(HKEY_CURRENT_USER, "StartupFolder", &file);
+            let name = f.path().file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(file.clone());
+            out.push(crate::qsx::Item { key: format!("startup\t{}\tfolder:{file}", f.path().display()), name, sub: if on { "On".into() } else { "Off".into() }, on, ..Default::default() });
+        }
+    }
+    out.sort_by_key(|i| i.name.to_lowercase());
+    out
+}
+
+/// Flip one startup item, the way Windows does: write its 12-byte record (02 = on, 03 = off).
+/// PC-wide entries need administrator rights; without them the write fails and nothing changes.
+fn set_startup(id: &str, on: bool) {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_BINARY};
+    let Some((kind, name)) = id.rsplit('\t').next().and_then(|k| k.split_once(':')) else { return };
+    let (root, list) = match kind { "cu" => (HKEY_CURRENT_USER, "Run"), "lm" => (HKEY_LOCAL_MACHINE, "Run"), _ => (HKEY_CURRENT_USER, "StartupFolder") };
+    let mut rec = [0u8; 12];
+    rec[0] = if on { 2 } else { 3 };
+    unsafe {
+        let _ = RegSetKeyValueW(root, &HSTRING::from(format!("{APPROVED}\\{list}")), &HSTRING::from(name), REG_BINARY.0, Some(rec.as_ptr() as *const c_void), 12);
+    }
+}
+
 fn set_sender(id: &str, on: bool) {
     let v = on as u32;
     unsafe {
@@ -904,7 +1002,7 @@ fn pages() -> Vec<Page> {
             r(SET | 0xE5C4, "Focus", "Session duration, hide badges on apps", Link("ms-settings:quiethours")),
             r(0, "Notifications from apps and other senders", "", Header),
             r(0, "Sort by:", "", SortBy),
-            r(0, "", "", Senders(senders)),
+            r(0, "", "", Senders(senders, set_sender)),
         ]),
         sub("Power & battery", "System", vec![
             r(0, "", "", Big(battery)),
@@ -966,6 +1064,10 @@ fn pages() -> Vec<Page> {
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
         ]),
+        sub("Startup", "Apps", vec![
+            r(0, "Startup apps", "", Header),
+            r(0, "", "", Senders(startup_apps, set_startup)),
+        ]),
         top("Apps", 0xE71D, vec![
             r(0xE71D, "Installed apps", "Uninstall and manage apps on your PC", Link("ms-settings:appsfeatures")),
             r(SET | 0xEFDD, "Advanced app settings", "Choose where to get apps, archive apps, uninstall updates", Link("ms-settings:appsfeatures-app")),
@@ -974,7 +1076,7 @@ fn pages() -> Vec<Page> {
             r(0xE826, "Offline maps", "Downloads, storage location, map updates", Link("ms-settings:maps")),
             r(SET | 0xF6AB, "Apps for websites", "Websites that can open in an app instead of a browser", Link("ms-settings:appsforwebsites")),
             r(0xE116, "Video playback", "Video adjustments, HDR streaming, battery options", Link("ms-settings:videoplayback")),
-            r(0xE7B5, "Startup", "Apps that start automatically when you sign in", Link("ms-settings:startupapps")),
+            r(0xE7B5, "Startup", "Apps that start automatically when you sign in", Sub("Startup")),
             r(0xEA6C, "Resume", "Continue work across devices", Link("ms-settings:crossdevice")),
         ]),
         top("Accounts", 0xE77B, vec![
@@ -1146,8 +1248,8 @@ fn read_value(k: Kind) -> Val {
         Kind::When(shown, _) => Val { list: if shown() { vec![Default::default()] } else { Vec::new() }, ..Default::default() },
         Kind::Tiles(get) | Kind::Facts(get) | Kind::ThemeHero(get) | Kind::TimeHero(get) | Kind::HomeHero(get) | Kind::AccountHero(get) => Val { list: get(), ..Default::default() },
         Kind::BtTiles(get) => Val { list: get().into_iter().map(|d| (d.name, String::new(), d.on, d.key)).collect(), ..Default::default() },
-        Kind::Senders(get) => Val {
-            list: get().into_iter().map(|d| (d.name, if d.on { "Banners, Sounds".to_string() } else { "Off".to_string() }, d.on, d.key)).collect(),
+        Kind::Senders(get, _) => Val {
+            list: get().into_iter().map(|d| (d.name, if !d.sub.is_empty() { d.sub } else if d.on { "Banners, Sounds".to_string() } else { "Off".to_string() }, d.on, d.key)).collect(),
             ..Default::default()
         },
         Kind::Devices(get, _) => Val {
@@ -1212,7 +1314,7 @@ fn row_height(k: Kind, i: usize, counts: &[usize]) -> f32 {
         Kind::Big(_) => 95.0,
         Kind::Toggle(..) | Kind::ToggleMore(..) | Kind::State(..) => ROW_H + 0.67, // cards holding a switch are two thirds of a pixel taller in Settings
         Kind::Note(..) => if counts.get(i).copied().unwrap_or(0) > 0 { 52.0 } else { -4.0 },
-        Kind::Senders(_) => (73.0 * counts.get(i).copied().unwrap_or(0) as f32 - 5.0).max(0.0),
+        Kind::Senders(..) => (73.0 * counts.get(i).copied().unwrap_or(0) as f32 - 5.0).max(0.0),
         _ => ROW_H,
     }
 }
@@ -1709,7 +1811,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                 hits.push((bx, Hit::Sort));
                 continue;
             }
-            if let Kind::Senders(_) = row.kind {
+            if let Kind::Senders(..) = row.kind {
                 let list = ui.vals.get(i).map(|v| v.list.clone()).unwrap_or_default();
                 let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
                 for (k, (name, what, on, id)) in list.iter().enumerate() {
@@ -1719,7 +1821,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                     }
                     rt.FillRoundedRectangle(&rrect(c, 4.0), &b(if hover == Some(Hit::Sender(i, k)) { 0x323232 } else { 0x2B2B2B })?);
                     rt.DrawRoundedRectangle(&rrect(rect(c.left + 0.5, c.top + 0.5, c.right - 0.5, c.bottom - 0.5), 4.0), &b(0x1D1D1D)?, 1.0, None);
-                    let px = APP_ICONS.with(|m| m.borrow_mut().entry(id.clone()).or_insert_with(|| crate::files::image(&format!("shell:AppsFolder\\{id}"), 24, windows::Win32::UI::Shell::SIIGBF_ICONONLY).filter(|i| i.0 == 24 && i.1 == 24).map(|i| i.2).unwrap_or_default()).clone());
+                    let px = APP_ICONS.with(|m| m.borrow_mut().entry(id.clone()).or_insert_with(|| crate::files::image(&icon_source(id), 24, windows::Win32::UI::Shell::SIIGBF_ICONONLY).filter(|i| i.0 == 24 && i.1 == 24).map(|i| i.2).unwrap_or_default()).clone());
                     if px.len() == 24 * 24 * 4 {
                         if let Ok(bm) = rt.CreateBitmap(D2D_SIZE_U { width: 24, height: 24 }, Some(px.as_ptr() as *const c_void), 96, &bp) {
                             crate::flyout::draw_icon(&rt, &bm, c.left + 16.0, c.top + 22.0, 24.0);
@@ -1821,7 +1923,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                     continue;
                 }
                 Kind::HomeHero(_) | Kind::AccountHero(_) | Kind::UpdateHero(_) | Kind::When(..) | Kind::TimeHero(_) | Kind::ThemeHero(_) | Kind::NetHero(_) | Kind::BtTiles(_) | Kind::Center(..) | Kind::Space(_) => {}
-                Kind::Header | Kind::Section | Kind::SortBy | Kind::Senders(_) | Kind::Big(_) | Kind::Note(..) | Kind::Tiles(_) | Kind::Facts(_) | Kind::RenamePc => {}
+                Kind::Header | Kind::Section | Kind::SortBy | Kind::Senders(..) | Kind::Big(_) | Kind::Note(..) | Kind::Tiles(_) | Kind::Facts(_) | Kind::RenamePc => {}
                 Kind::Devices(_, pair) => {
                     let line = b(0x1D1D1D)?;
                     let inner = b(0x272727)?;
@@ -2141,10 +2243,11 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         });
                         (ui.page, app)
                     });
-                    if let Some((id, on)) = app {
+                    let set = pages().get(page).and_then(|p| p.rows.get(i)).and_then(|r| if let Kind::Senders(_, set) = r.kind { Some(set) } else { None });
+                    if let (Some((id, on)), Some(set)) = (app, set) {
                         std::thread::spawn(move || {
                             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-                            set_sender(&id, on);
+                            set(&id, on);
                             load(page);
                         });
                     }
@@ -2323,6 +2426,18 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_records_and_commands() {
+        assert!(startup_on(&[])); // never switched: on
+        assert!(startup_on(&[2, 0, 0, 0]) && startup_on(&[6, 0, 0, 0]));
+        assert!(!startup_on(&[3, 0, 0, 0]) && !startup_on(&[7, 0, 0, 0]));
+        assert_eq!(exe_of(r#""C:\Program Files\A B\x.exe" --hidden"#), r"C:\Program Files\A B\x.exe");
+        assert_eq!(exe_of(r"C:\WINDOWS\system32\SecurityHealthSystray.exe"), r"C:\WINDOWS\system32\SecurityHealthSystray.exe");
+        assert_eq!(exe_of(r"C:\tools\run.EXE -background"), r"C:\tools\run.EXE");
+        assert_eq!(icon_source("startup\tC:/x.exe\tcu:X"), "C:/x.exe");
+        assert_eq!(icon_source("Microsoft.App_1!App"), r"shell:AppsFolder\Microsoft.App_1!App");
+    }
     #[test]
     fn layout_and_scale_math() {
         use Kind::*;

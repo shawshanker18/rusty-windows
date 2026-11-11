@@ -122,6 +122,12 @@ pub fn inherited_session_vars(names: &[String]) -> Vec<&str> {
     names.iter().map(String::as_str).filter(|n| { let u = n.to_ascii_uppercase(); u.starts_with("CLAUDE") || u.starts_with("ANTHROPIC") }).collect()
 }
 
+/// Is the `claude` tool itself signed in to a Claude account (its own stored sign-in, the one
+/// `claude auth login` makes)? Only then can a session run on the user's Claude plan.
+pub fn plan_signed_in(credentials_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(credentials_json).ok().is_some_and(|v| v["claudeAiOauth"]["accessToken"].as_str().is_some_and(|t| !t.is_empty()))
+}
+
 /// Whether to stop the CLI helper: only one that exists, is not working, and has been idle past the limit.
 pub fn release_helper(busy: bool, has_helper: bool, idle_secs: u64, limit_secs: u64) -> bool {
     has_helper && !busy && idle_secs >= limit_secs
@@ -789,7 +795,24 @@ fn ensure_proc() -> bool {
         None if s.session.is_some() => set_settings(|s| s.session = None),
         None => {}
     }
+    // Use the Claude plan when the tool is signed in to one: leave out the user settings file (on this
+    // PC it redirects the tool to another provider with an API key) and any ANTHROPIC_* variables, so
+    // the tool falls back to its own Claude sign-in. No key or token is read or copied by this window.
+    // ponytail: this also drops the user file's permission rules and hooks for these sessions; if that
+    // matters, pass a --settings file with everything but its env block instead
+    let creds = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude").join(".credentials.json");
+    let plan = plan_signed_in(&std::fs::read_to_string(creds).unwrap_or_default());
+    if plan {
+        args.extend(["--setting-sources".into(), "project,local".into()]);
+    }
     let mut cmd = std::process::Command::new(claude_exe());
+    if plan {
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().to_ascii_uppercase().starts_with("ANTHROPIC_") {
+                cmd.env_remove(k);
+            }
+        }
+    }
     // started from inside another Claude Code session (a terminal it opened, a test): do not hand
     // that session's own variables to our helper - with them it exits without answering
     let names: Vec<String> = std::env::vars_os().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
@@ -2846,6 +2869,9 @@ mod tests {
 
     #[test]
     fn sidebar_groups() {
+        assert!(plan_signed_in(r#"{"claudeAiOauth":{"accessToken":"x","subscriptionType":"max"},"mcpOAuth":{}}"#));
+        assert!(!plan_signed_in(r#"{"mcpOAuth":{"a":{"accessToken":"x"}}}"#)); // only connector sign-ins: not a Claude plan
+        assert!(!plan_signed_in(""));
         // the real app's record of a session, and what it does to our list
         let rec = r#"{"sessionId":"local_1","cliSessionId":"abc","title":"Part 1","isStarred":true,"isArchived":false,"lastActivityAt":5000000,"folderPlace":{"cwd":"C:/Users/me/Desktop/proj"},"postTurnSummary":{"status_category":"review_ready"}}"#;
         let (id, a) = parse_app_session(rec).unwrap();
