@@ -402,6 +402,161 @@ fn reg_str(root: HKEY, key: PCWSTR, name: PCWSTR) -> String {
     String::from_utf16_lossy(&buf[..(n as usize / 2).saturating_sub(1)]).trim().to_string()
 }
 
+// ---- settings that are one number in the registry (this user's): switches and drop-downs ----
+
+fn hkcu_u32(key: &str, name: &str) -> Option<u32> {
+    reg_u32(HKEY_CURRENT_USER, PCWSTR(HSTRING::from(key).as_ptr()), PCWSTR(HSTRING::from(name).as_ptr()))
+}
+
+/// Write the number and tell running programs (Explorer's taskbar and Start listen for this).
+fn set_hkcu_u32(key: &str, name: &str, v: u32) {
+    unsafe {
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from(name), REG_DWORD.0, Some(&v as *const _ as *const c_void), 4);
+        let what = w!("TraySettings");
+        let _ = SendNotifyMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, WPARAM(0), LPARAM(what.as_ptr() as isize));
+    }
+}
+
+/// Which option a stored number stands for; a number that is none of them (or no number at all) is `missing`.
+pub fn choice_index(value: Option<u32>, values: &[u32], missing: usize) -> usize {
+    value.and_then(|v| values.iter().position(|x| *x == v)).unwrap_or(missing)
+}
+
+/// A switch kept as one number: `on` / `off` are the stored values, `missing` what Windows assumes
+/// when nothing is stored.
+macro_rules! reg_switch {
+    ($get:ident, $set:ident, $key:expr, $name:expr, on = $on:expr, off = $off:expr, missing = $missing:expr) => {
+        fn $get() -> bool {
+            hkcu_u32($key, $name).map_or($missing, |v| v == $on)
+        }
+        fn $set(on: bool) {
+            set_hkcu_u32($key, $name, if on { $on } else { $off })
+        }
+    };
+}
+
+/// A drop-down kept as one number: the labels, the number each stands for, and the default.
+macro_rules! reg_choice {
+    ($get:ident, $list:ident, $set:ident, $key:expr, $name:expr, [$(($label:expr, $value:expr)),+], missing = $missing:expr) => {
+        fn $get() -> String {
+            [$($label),+][choice_index(hkcu_u32($key, $name), &[$($value),+], $missing)].to_string()
+        }
+        fn $list() -> Vec<String> {
+            [$($label),+].iter().map(|s| s.to_string()).collect()
+        }
+        fn $set(i: usize) {
+            if let Some(v) = [$($value),+].get(i) {
+                set_hkcu_u32($key, $name, *v)
+            }
+        }
+    };
+}
+
+const ADV: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+
+// Multitasking
+fn snap_on() -> bool {
+    let mut on = windows::core::BOOL(0);
+    unsafe { let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(0x0082), 0, Some(&mut on as *mut _ as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); } // SPI_GETWINARRANGING
+    on.as_bool()
+}
+fn set_snap(on: bool) {
+    unsafe { let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(0x0083), on as u32, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); } // SPI_SETWINARRANGING
+}
+reg_switch!(snap_flyout, set_snap_flyout, ADV, "EnableSnapAssistFlyout", on = 1, off = 0, missing = true);
+reg_switch!(snap_bar, set_snap_bar, ADV, "EnableSnapBar", on = 1, off = 0, missing = true);
+reg_switch!(snap_suggest, set_snap_suggest, ADV, "SnapAssist", on = 1, off = 0, missing = true);
+reg_switch!(shake, set_shake, ADV, "DisallowShaking", on = 0, off = 1, missing = false);
+reg_choice!(alt_tab, alt_tabs, set_alt_tab, ADV, "MultiTaskingAltTabFilter",
+    [("Open windows and 20 most recent tabs", 0), ("Open windows and 5 most recent tabs", 1), ("Open windows and 3 most recent tabs", 2), ("Open windows only", 3)], missing = 3);
+
+// Clipboard
+reg_switch!(clip_history, set_clip_history, "Software\\Microsoft\\Clipboard", "EnableClipboardHistory", on = 1, off = 0, missing = false);
+
+// Taskbar (Windows' own taskbar reads these)
+reg_choice!(tb_align, tb_aligns, set_tb_align, ADV, "TaskbarAl", [("Left", 0), ("Center", 1)], missing = 1);
+reg_choice!(tb_search, tb_searches, set_tb_search, "Software\\Microsoft\\Windows\\CurrentVersion\\Search", "SearchboxTaskbarMode",
+    [("Hide", 0), ("Search icon only", 1), ("Search box", 2), ("Search icon and label", 3)], missing = 2);
+reg_choice!(tb_combine, tb_combines, set_tb_combine, ADV, "TaskbarGlomLevel", [("Always", 0), ("When taskbar is full", 1), ("Never", 2)], missing = 0);
+reg_switch!(tb_taskview, set_tb_taskview, ADV, "ShowTaskViewButton", on = 1, off = 0, missing = true);
+reg_switch!(tb_seconds, set_tb_seconds, ADV, "ShowSecondsInSystemClock", on = 1, off = 0, missing = false);
+reg_switch!(tb_endtask, set_tb_endtask, "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced\\TaskbarDeveloperSettings", "TaskbarEndTask", on = 1, off = 0, missing = false);
+
+// Start
+reg_choice!(start_layout, start_layouts, set_start_layout, ADV, "Start_Layout", [("Default", 0), ("More pins", 1), ("More recommendations", 2)], missing = 0);
+reg_switch!(start_most_used, set_start_most_used, ADV, "Start_TrackProgs", on = 1, off = 0, missing = true);
+reg_switch!(start_recent, set_start_recent, ADV, "Start_TrackDocs", on = 1, off = 0, missing = true);
+reg_switch!(start_tips, set_start_tips, ADV, "Start_IrisRecommendations", on = 1, off = 0, missing = true);
+reg_switch!(start_account, set_start_account, ADV, "Start_AccountNotifications", on = 1, off = 0, missing = true);
+
+// Storage
+reg_switch!(storage_sense, set_storage_sense, "Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy", "01", on = 1, off = 0, missing = false);
+
+/// One line about a drive: "312 GB used of 476 GB  |  164 GB free".
+pub fn drive_line(total: u64, free: u64) -> String {
+    format!("{} used of {}  |  {} free", size_label(total.saturating_sub(free)), size_label(total), size_label(free))
+}
+
+/// This PC's fixed drives, each with its name, how full it is, and its own icon.
+fn drive_list() -> Vec<crate::qsx::Item> {
+    use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    let mut out = Vec::new();
+    unsafe {
+        let mask = GetLogicalDrives();
+        for i in 0..26u8 {
+            let letter = (b'A' + i) as char;
+            let root = HSTRING::from(format!("{letter}:\\"));
+            if mask & (1 << i) == 0 || GetDriveTypeW(&root) != 3 {
+                continue;
+            }
+            let (mut free, mut all) = (0u64, 0u64);
+            if GetDiskFreeSpaceExW(&root, None, Some(&mut all), Some(&mut free)).is_err() {
+                continue;
+            }
+            let mut label = [0u16; 64];
+            let _ = GetVolumeInformationW(&root, Some(&mut label), None, None, None, None);
+            let label = String::from_utf16_lossy(&label[..label.iter().position(|c| *c == 0).unwrap_or(0)]);
+            out.push(crate::qsx::Item {
+                name: format!("{} ({letter}:)", if label.is_empty() { "Local Disk" } else { &label }),
+                sub: drive_line(all, free),
+                key: format!("app\t{letter}:\\\t{letter}:\\"),
+                ..Default::default()
+            });
+        }
+    }
+    out
+}
+
+/// A drive's Open button: show it in File Explorer.
+fn open_drive(id: &str, _name: &str) {
+    if let Some(path) = id.split('\t').nth(2) {
+        crate::files::request(path);
+    }
+}
+
+/// How much is in this user's temporary-files folder.
+// ponytail: stops counting after 50,000 files so a huge folder cannot hold the page up
+fn temp_size() -> String {
+    fn walk(dir: &std::path::Path, left: &mut u32) -> u64 {
+        let mut sum = 0;
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if *left == 0 {
+                break;
+            }
+            *left -= 1;
+            match e.metadata() {
+                Ok(m) if m.is_dir() => sum += walk(&e.path(), left),
+                Ok(m) => sum += m.len(),
+                _ => {}
+            }
+        }
+        sum
+    }
+    let mut left = 50_000;
+    let bytes = walk(&std::env::temp_dir(), &mut left);
+    if left == 0 { format!("More than {}", size_label(bytes)) } else { size_label(bytes) }
+}
+
 const PERSONALIZE: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
 
 fn set_personalize(name: PCWSTR, v: u32) {
@@ -1052,9 +1207,10 @@ fn pages() -> Vec<Page> {
             r(0xEA8F, "Notifications", "Alerts from apps and system, do not disturb", Sub("Notifications")),
             r(SET | 0xE5C4, "Focus", "Reduce distractions", Link("ms-settings:quiethours")),
             r(0xE7E8, "Power & battery", "Screen and sleep, battery usage, power mode, energy saver", Sub("Power & battery")),
-            r(0xEDA2, "Storage", "Storage space, drives, configuration rules", Link("ms-settings:storagesense")),
+            r(0xEDA2, "Storage", "Storage space, drives, configuration rules", Sub("Storage")),
             r(0xE72D, "Share", "Share files, photos, links and more", Link("ms-settings:crossdevice")),
-            r(0xE7C4, "Multitasking", "Snap windows, desktops, task switching", Link("ms-settings:multitasking")),
+            r(0xE7C4, "Multitasking", "Snap windows, desktops, task switching", Sub("Multitasking")),
+            r(0xE77F, "Clipboard", "Cut and copy history, sync, clear", Sub("Clipboard")),
             r(0xE946, "About", "Device specifications, rename PC, Windows specifications", Sub("About")),
         ]),
         sub("Display", "System", {
@@ -1148,8 +1304,8 @@ fn pages() -> Vec<Page> {
             r(SET | 0xF431, "Dynamic Lighting", "Connected devices, effects, app settings", Link("ms-settings:personalization-lighting")),
             r(0xEE3F, "Lock screen", "Lock screen images, apps, animations", Link("ms-settings:lockscreen")),
             r(0xE144, "Text input", "Touch keyboard, voice typing, emoji and more, input method editor", Link("ms-settings:personalization-textinput")),
-            r(0xE8FC, "Start", "Recent apps and items, folders", Link("ms-settings:personalization-start")),
-            r(0xE90E, "Taskbar", "Taskbar behaviors, system pins", Link("ms-settings:taskbar")),
+            r(0xE8FC, "Start", "Recent apps and items, folders", Sub("Start")),
+            r(0xE90E, "Taskbar", "Taskbar behaviors, system pins", Sub("Taskbar")),
             r(0xE8D2, "Fonts", "Install, manage", Link("ms-settings:fonts")),
             r(0xE7F8, "Device usage", "Select all the ways you plan to use your device", Link("ms-settings:deviceusage")),
         ]),
@@ -1157,6 +1313,45 @@ fn pages() -> Vec<Page> {
             r(0xE790, "Choose your mode", "Change the colors that appear in Windows and your apps", Choice(color_mode, color_modes, set_color_mode)),
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
+        ]),
+        sub("Storage", "System", vec![
+            r(0, "Drives", "", Header),
+            r(0, "", "", Actions(drive_list, "Open", open_drive)),
+            r(0, "Storage management", "", Header),
+            r(0xEDA2, "Storage Sense", "Automatically free up space, delete temporary files, and manage locally available cloud content", Toggle(storage_sense, set_storage_sense)),
+            r(0xE74D, "Temporary files", "Files your apps left in your temporary folder", Info(temp_size)),
+            r(0xE9F5, "Cleanup recommendations", "Windows' own list of what can be removed", Link("ms-settings:storagerecommendations")),
+        ]),
+        sub("Multitasking", "System", vec![
+            r(0xE7C4, "Snap windows", "Automatically resize and arrange windows on your screen", Toggle(snap_on, set_snap)),
+            r(0, "Show snap layouts when I hover over a window's maximize button", "", Toggle(snap_flyout, set_snap_flyout)),
+            r(0, "Show snap layouts when I drag a window to the top of my screen", "", Toggle(snap_bar, set_snap_bar)),
+            r(0, "When I snap a window, suggest what I can snap next to it", "", Toggle(snap_suggest, set_snap_suggest)),
+            r(0xE8AB, "Show tabs from apps when snapping or pressing Alt+Tab", "", Choice(alt_tab, alt_tabs, set_alt_tab)),
+            r(0xE7C4, "Title bar window shake", "When I grab a window's title bar and shake it, minimize all other windows", Toggle(shake, set_shake)),
+        ]),
+        sub("Clipboard", "System", vec![
+            r(0xE77F, "Clipboard history", "Save multiple items to the clipboard to use later. Press Windows logo key + V to view your clipboard history and paste from it.", Toggle(clip_history, set_clip_history)),
+            r(0xE72E, "Sync across your devices and clear clipboard data", "On Windows' own Clipboard page", Link("ms-settings:clipboard")),
+        ]),
+        sub("Taskbar", "Personalization", vec![
+            r(0, "Taskbar items", "", Header),
+            r(0xE721, "Search", "", Choice(tb_search, tb_searches, set_tb_search)),
+            r(0xE7C4, "Task view", "", Toggle(tb_taskview, set_tb_taskview)),
+            r(0, "Taskbar behaviors", "", Header),
+            r(0xE8E3, "Taskbar alignment", "", Choice(tb_align, tb_aligns, set_tb_align)),
+            r(0xE8FD, "Combine taskbar buttons and hide labels", "", Choice(tb_combine, tb_combines, set_tb_combine)),
+            r(0xE823, "Show seconds in system tray clock", "Uses more power", Toggle(tb_seconds, set_tb_seconds)),
+            r(0xE71A, "End task", "Enable end task in taskbar by right click", Toggle(tb_endtask, set_tb_endtask)),
+            r(0xE946, "These settings change Windows' own taskbar", "The Rust taskbar does not follow them yet", Link("ms-settings:taskbar")),
+        ]),
+        sub("Start", "Personalization", vec![
+            r(0xE8FC, "Layout", "", Choice(start_layout, start_layouts, set_start_layout)),
+            r(0xE71D, "Show most used apps", "", Toggle(start_most_used, set_start_most_used)),
+            r(0xE823, "Show recommended files in Start, recent files in File Explorer, and items in Jump Lists", "", Toggle(start_recent, set_start_recent)),
+            r(0xE82F, "Show recommendations for tips, shortcuts, new apps, and more", "", Toggle(start_tips, set_start_tips)),
+            r(0xE77B, "Show account-related notifications", "", Toggle(start_account, set_start_account)),
+            r(0xE8B7, "Folders", "These folders appear on Start next to the Power button", Link("ms-settings:personalization-start-places")),
         ]),
         sub("Installed apps", "Apps", vec![
             r(0, "", "", Actions(installed_apps, "Uninstall", uninstall_app)),
@@ -2547,6 +2742,15 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_choices_and_drive_lines() {
+        assert_eq!(choice_index(Some(2), &[0, 1, 2, 3], 3), 2);
+        assert_eq!(choice_index(None, &[0, 1], 1), 1);       // nothing stored: Windows' default
+        assert_eq!(choice_index(Some(9), &[0, 1], 1), 1);    // a number that is not one of the options
+        assert_eq!(drive_line(500 * 1024 * 1024 * 1024, 100 * 1024 * 1024 * 1024), "400 GB used of 500 GB  |  100 GB free");
+        assert_eq!(drive_line(10, 20), "0 MB used of 0 MB  |  0 MB free"); // never underflows
+    }
 
     #[test]
     fn installed_app_records() {
