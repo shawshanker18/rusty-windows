@@ -9,6 +9,7 @@ public static class CM { [DllImport("user32.dll", CharSet=CharSet.Unicode)] publ
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }
 '@
 $img = "$env:TEMP\test square.png"; $exe = "$PSScriptRoot\..\target\release\shellbits.exe"
+if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { 'Rust UI is the shell right now and this script stops it (the taskbar would vanish): not run.'; exit 1 }
 Stop-Process -Name shellbits -ErrorAction SilentlyContinue; Start-Sleep 2; Start-Process $exe; Start-Sleep 5
 $start = Get-Date; $marker = "imgtest-$([guid]::NewGuid().ToString('N').Substring(0,6))"
 Start-Process $exe -ArgumentList '--claude'

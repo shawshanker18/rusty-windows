@@ -8,6 +8,7 @@ public static class CI { [DllImport("user32.dll", CharSet=CharSet.Unicode)] publ
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, string l);
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }
 '@
+if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { 'Rust UI is the shell right now and this script stops it (the taskbar would vanish): not run.'; exit 1 }
 Stop-Process -Name shellbits -ErrorAction SilentlyContinue; Start-Sleep 2
 # (this script is often run from inside a Claude Code session; Rust UI itself drops that session's
 # CLAUDE* / ANTHROPIC* variables before starting its helper, so nothing is cleaned here)

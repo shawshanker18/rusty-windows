@@ -27,6 +27,7 @@ function Run($name) {
   }
   $form.Close(); $form.Dispose(); [System.Windows.Forms.Application]::DoEvents(); Start-Sleep 1
 }
+if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { 'Rust UI is the shell right now and this script stops it (the taskbar would vanish): not run.'; exit 1 }
 Stop-Process -Name shellbits -Force -ErrorAction SilentlyContinue; Start-Sleep 1
 Run 'snap-native.png'
 Start-ScheduledTask shellbits; Start-Sleep 5

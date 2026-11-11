@@ -9,6 +9,7 @@ public static class CT { [DllImport("user32.dll")] public static extern void key
 '@
 $scr=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 function Shot($name) { $b=New-Object System.Drawing.Bitmap $scr.Width,$scr.Height; $g=[System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen(0,0,0,0,$b.Size); $b.Save((Join-Path $outDir $name)) }
+if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { 'Rust UI is the shell right now and this script stops it (the taskbar would vanish): not run.'; exit 1 }
 Stop-Process -Name shellbits -Force -ErrorAction SilentlyContinue; Start-Sleep 1
 [CT]::WinTab(); Start-Sleep -Milliseconds 1800
 Shot 'taskview-native.png'
