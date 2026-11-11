@@ -790,6 +790,12 @@ unsafe fn press(hwnd: HWND, h: Hit) {
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Re-entered while the window's state is in use: a handler called into Windows (a shell call, a
+    // menu, a dialog) and that ran a message loop. Touching the state again would panic and close the
+    // window, so this message gets default handling instead.
+    if ST.with(|u| u.try_borrow_mut().is_err()) && !matches!(msg, WM_NCCREATE | WM_CREATE | WM_NCDESTROY | WM_DESTROY) {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
     let s = GetDpiForWindow(hwnd) as f32 / 96.0;
     let at = |lp: LPARAM| {
         let mut rc = RECT::default();

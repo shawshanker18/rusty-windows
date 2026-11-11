@@ -139,7 +139,7 @@ pub fn watch() {
 }
 
 unsafe fn draw(rt: &ID2D1DCRenderTarget) -> windows::core::Result<()> {
-    rt.Clear(Some(&rgb(0x2C2C2C)));
+    rt.Clear(Some(&crate::flyout::base(rgb(0x2C2C2C))));
     let Some((app, title, body, _)) = CUR.lock().unwrap().clone() else { return Ok(()) };
     let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
     let fmt = |size: f32, weight| dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("en-us"));

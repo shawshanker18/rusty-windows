@@ -495,7 +495,7 @@ unsafe fn draw_qs(st: &State, g: &Gfx) -> windows::core::Result<()> {
         return draw_page(st, g);
     }
     let rt = &g.rt;
-    rt.Clear(Some(&C_PANEL));
+    rt.Clear(Some(&crate::flyout::base(C_PANEL)));
     let brush = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
     let white = brush(rgb(0xFFFFFF))?;
     let black = brush(rgb(0x000000))?;
@@ -626,7 +626,7 @@ unsafe fn draw_qs(st: &State, g: &Gfx) -> windows::core::Result<()> {
 
 unsafe fn draw_media(st: &State, g: &Gfx) -> windows::core::Result<()> {
     let rt = &g.rt;
-    rt.Clear(Some(&C_PANEL));
+    rt.Clear(Some(&crate::flyout::base(C_PANEL)));
     let Some(m) = &st.sys.media else { return Ok(()) };
     let brush = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
     let white = brush(rgb(0xFFFFFF))?;
@@ -748,6 +748,8 @@ pub unsafe fn toggle(qs: HWND) {
     place(qs);
     SHOWN_AT.with(|t| t.set(Some(std::time::Instant::now())));
     crate::flyout::force_foreground(qs);
+    let _ = UpdateWindow(qs);
+    crate::flyout::slide(&[qs, HWND(MEDIA.load(Relaxed) as *mut c_void)], true);
     collect_async(); // radios, Wi-Fi name, Bluetooth device, brightness, media: arrive in a moment
     crate::perf::start(post_qs);
 }
@@ -755,6 +757,7 @@ pub unsafe fn toggle(qs: HWND) {
 unsafe fn hide(qs: HWND) {
     ST.with(|s| { let mut st = s.borrow_mut(); st.page = Page::Main; st.items.clear(); });
     crate::perf::stop();
+    crate::flyout::slide(&[qs, HWND(MEDIA.load(Relaxed) as *mut c_void)], false);
     let _ = ShowWindow(qs, SW_HIDE);
     let _ = ShowWindow(HWND(MEDIA.load(Relaxed) as *mut c_void), SW_HIDE);
     crate::flyout::give_back();
@@ -1264,7 +1267,7 @@ pub(crate) unsafe fn switch(rt: &ID2D1DCRenderTarget, x: f32, y: f32, on: bool) 
 
 unsafe fn draw_page(st: &State, g: &Gfx) -> windows::core::Result<()> {
     let rt = &g.rt;
-    rt.Clear(Some(&C_PANEL));
+    rt.Clear(Some(&crate::flyout::base(C_PANEL)));
     let brush = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
     let white = brush(rgb(0xFFFFFF))?;
     let black = brush(rgb(0x000000))?;

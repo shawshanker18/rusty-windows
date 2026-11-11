@@ -564,7 +564,7 @@ unsafe fn make_gfx() -> windows::core::Result<Gfx> {
 
 unsafe fn draw_nc(st: &State, g: &Gfx, h: f32) -> windows::core::Result<()> {
     let rt = &g.rt;
-    rt.Clear(Some(&C_PANEL));
+    rt.Clear(Some(&crate::flyout::base(C_PANEL)));
     let brush = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
     let white = brush(rgb(0xFFFFFF))?;
     let black = brush(rgb(0x000000))?;
@@ -668,7 +668,7 @@ unsafe fn draw_nc(st: &State, g: &Gfx, h: f32) -> windows::core::Result<()> {
 unsafe fn draw_cal(st: &State, g: &Gfx) -> windows::core::Result<()> {
     let rt = &g.rt;
     let h = cal_height(st);
-    rt.Clear(Some(&C_CARD));
+    rt.Clear(Some(&crate::flyout::base(C_CARD)));
     let brush = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
     let white = brush(rgb(0xFFFFFF))?;
     let text = |s: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| {
@@ -842,6 +842,8 @@ pub unsafe fn toggle(nc: HWND) {
     let t2 = t0.elapsed().as_millis();
     SHOWN_AT.with(|t| t.set(Some(std::time::Instant::now())));
     crate::flyout::force_foreground(nc);
+    let _ = UpdateWindow(nc);
+    crate::flyout::slide(&[nc, HWND(CAL.load(Relaxed) as *mut c_void)], true);
     fetch_async();
     // how long opening took on the UI thread (it also serves the taskbar): keep an eye on it
     let _ = std::fs::write(std::env::temp_dir().join("shellbits-nc-open.txt"), format!("state {t1} ms, placed {t2} ms, focused {} ms
@@ -849,6 +851,7 @@ pub unsafe fn toggle(nc: HWND) {
 }
 
 unsafe fn hide() {
+    crate::flyout::slide(&[HWND(NC.load(Relaxed) as *mut c_void), HWND(CAL.load(Relaxed) as *mut c_void)], false);
     let _ = ShowWindow(HWND(NC.load(Relaxed) as *mut c_void), SW_HIDE);
     let _ = ShowWindow(HWND(CAL.load(Relaxed) as *mut c_void), SW_HIDE);
     crate::flyout::give_back();

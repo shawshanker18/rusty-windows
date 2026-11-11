@@ -441,7 +441,7 @@ fn flow_hit(n: usize, x: f32, y: f32) -> Option<usize> {
 }
 
 unsafe fn draw_flow(rt: &ID2D1DCRenderTarget, hidden: &[usize], hover: Option<usize>) -> windows::core::Result<()> {
-    rt.Clear(Some(&rgb(0x2C2C2C)));
+    rt.Clear(Some(&crate::flyout::base(rgb(0x2C2C2C))));
     let bp = D2D1_BITMAP_PROPERTIES {
         pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
         dpiX: 96.0,

@@ -1942,6 +1942,12 @@ fn hit(x: f32, y: f32) -> Option<Hit> {
 }
 
 pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Re-entered while the window's state is in use: a handler called into Windows (a shell call, a
+    // menu, a dialog) and that ran a message loop. Touching the state again would panic and close the
+    // window, so this message gets default handling instead.
+    if UI.with(|u| u.try_borrow_mut().is_err()) && !matches!(msg, WM_NCCREATE | WM_CREATE | WM_NCDESTROY | WM_DESTROY) {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
     let s = GetDpiForWindow(hwnd) as f32 / 96.0;
     let dips = |lp: LPARAM| ((lp.0 & 0xFFFF) as i16 as f32 / s, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s);
     let cw = || {

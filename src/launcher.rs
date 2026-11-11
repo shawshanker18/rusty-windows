@@ -1407,7 +1407,7 @@ unsafe fn draw(st: &mut State, mem: HDC, rc: &RECT, dpi: f32, is_pill: bool) -> 
     let st = &*st;
     let g = st.gfx.as_ref().unwrap();
     rt.BeginDraw();
-    rt.Clear(Some(&C_PANEL));
+    rt.Clear(Some(&crate::flyout::base(C_PANEL)));
     let brush = |c: D2D1_COLOR_F| rt.CreateSolidColorBrush(&c, None);
     let white = |a: f32| rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a }, None);
     let text = |s: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| {

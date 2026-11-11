@@ -398,6 +398,7 @@ fn main() -> windows::core::Result<()> {
             }
             return Ok(());
         }
+        flyout::LIVE.store(true, Relaxed); // panels now show Windows' blurred backdrop instead of a flat fill
         // a second, idle copy of this program waits for this one: if this one crashes, it starts it again
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::process::Command::new(exe).arg("--watchdog").arg(std::process::id().to_string()).args(&args[1..]).spawn();

@@ -423,7 +423,7 @@ unsafe fn draw(g: &Gfx, mem: HDC, rc: &RECT, dpi: f32) -> windows::core::Result<
     rt.BeginDraw();
     let (w, h) = ((rc.right - rc.left) as f32 * 96.0 / dpi, (rc.bottom - rc.top) as f32 * 96.0 / dpi);
     let white = |a: f32| rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a }, None);
-    rt.Clear(Some(&D2D1_COLOR_F { r: BG.0, g: BG.1, b: BG.2, a: BG.3 }));
+    rt.Clear(Some(&base(D2D1_COLOR_F { r: BG.0, g: BG.1, b: BG.2, a: BG.3 })));
     let text = |s: &[u16], f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| {
         rt.DrawText(s, f, &r, b, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL)
     };
@@ -704,5 +704,95 @@ pub unsafe fn dark_menus() {
         let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
         set(2);
         flush();
+    }
+}
+
+// ======================= Windows' panel material and motion =======================
+
+/// True in the running shell; never set in the off-screen snapshot modes.
+pub static LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a panel is cleared to. Live: a see-through tint, so the blurred backdrop Windows gives a
+/// `fluent_window` shows through (a flat opaque fill hid it; no tint at all came out light grey).
+/// Off screen (snapshots) there is no backdrop, so the flat colour stands in.
+pub fn base(flat: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F) -> windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+    // 86% of the panel colour over the blur: the film shows Windows' panels within about 6 levels of
+    // #2C2C2C whatever is behind them, i.e. a strong tint with a little of the background showing
+    if LIVE.load(std::sync::atomic::Ordering::Relaxed) { windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F { a: 0.86, ..flat } } else { flat }
+}
+
+// Measured from 30 fps film of Windows' Quick Settings (snap/study/quick-settings):
+// opening it is 200 px low and arrives in 280 ms, fast first (quartic ease-out);
+// closing it drops 200 px in 126 ms, slow first (cubic ease-in), then is gone.
+const SLIDE: f32 = 200.0;
+const OPEN_MS: f32 = 280.0;
+const CLOSE_MS: f32 = 126.0;
+
+/// How far below its resting place (px at 100%) a panel is `ms` after it starts opening.
+pub fn open_offset(ms: f32) -> f32 {
+    SLIDE * (1.0 - (ms / OPEN_MS).clamp(0.0, 1.0)).powi(4)
+}
+
+/// ...and `ms` after it starts closing.
+pub fn close_offset(ms: f32) -> f32 {
+    SLIDE * (ms / CLOSE_MS).clamp(0.0, 1.0).powi(3)
+}
+
+/// Slide panels that are already shown at their resting place: up into it (`open`) or down out of it.
+/// The part that would cover the taskbar is cut off, as in Windows (panels rise from behind it).
+// ponytail: runs on the caller's thread for 126-280 ms; move to a timer if input ever feels held up
+pub unsafe fn slide(wins: &[windows::Win32::Foundation::HWND], open: bool) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let mut wa = RECT::default();
+    let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut wa as *mut _ as *mut std::ffi::c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+    let rest: Vec<(windows::Win32::Foundation::HWND, RECT)> = wins.iter().filter(|h| IsWindowVisible(**h).as_bool()).map(|h| { let mut r = RECT::default(); let _ = GetWindowRect(*h, &mut r); (*h, r) }).collect();
+    let Some(first) = rest.first() else { return };
+    let scale = windows::Win32::UI::HiDpi::GetDpiForWindow(first.0) as f32 / 96.0;
+    let total = if open { OPEN_MS } else { CLOSE_MS };
+    let t0 = std::time::Instant::now();
+    loop {
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        let off = ((if open { open_offset(ms) } else { close_offset(ms) }) * scale).round() as i32;
+        for (h, r) in &rest {
+            let (w, hgt) = (r.right - r.left, r.bottom - r.top);
+            let _ = SetWindowRgn(*h, Some(CreateRectRgn(0, 0, w, (wa.bottom - (r.top + off)).clamp(0, hgt))), false);
+            let _ = SetWindowPos(*h, None, r.left, r.top + off, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+        if ms >= total {
+            break;
+        }
+    }
+    for (h, r) in &rest {
+        if open {
+            let _ = SetWindowPos(*h, None, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowRgn(*h, None, true);
+        } else {
+            // leave it hidden at its resting place, whole again, for the next time it opens
+            let _ = ShowWindow(*h, SW_HIDE);
+            let _ = SetWindowRgn(*h, None, false);
+            let _ = SetWindowPos(*h, None, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    #[test]
+    fn slide_matches_the_film() {
+        // opening: film showed 164, 104, 64, 37, 19, 3 px left at 15, 41, 73, 101, 131, 181 ms
+        for (ms, px) in [(15.0, 164.0), (41.0, 104.0), (73.0, 64.0), (101.0, 37.0), (131.0, 19.0), (181.0, 3.0)] {
+            assert!((open_offset(ms) - px).abs() < 8.0, "open {ms} ms: {} vs {px}", open_offset(ms));
+        }
+        assert_eq!(open_offset(280.0), 0.0);
+        // closing: 17, 60, 130 px down at 43, 78, 107 ms
+        for (ms, px) in [(43.0, 17.0), (78.0, 60.0), (107.0, 130.0)] {
+            assert!((close_offset(ms) - px).abs() < 14.0, "close {ms} ms: {} vs {px}", close_offset(ms));
+        }
+        assert_eq!(close_offset(500.0), 200.0);
     }
 }
