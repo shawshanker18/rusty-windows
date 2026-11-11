@@ -509,7 +509,14 @@ unsafe fn open(ui: &mut Ui, i: usize) {
     if e.dir {
         go(ui, p, true);
     } else {
-        ShellExecuteW(None, w!("open"), &HSTRING::from(p), PCWSTR::null(), &HSTRING::from(ui.path.as_str()), SW_SHOWNORMAL);
+        // On its own thread: starting a program can show a prompt (UAC, SmartScreen, "open with") that
+        // runs a message loop. Done here, with the window's state borrowed, that re-entered the window
+        // procedure and the double borrow ended the whole process - opening an .exe crashed the shell.
+        let dir = ui.path.clone();
+        std::thread::spawn(move || {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            ShellExecuteW(None, w!("open"), &HSTRING::from(p), PCWSTR::null(), &HSTRING::from(dir.as_str()), SW_SHOWNORMAL);
+        });
     }
 }
 

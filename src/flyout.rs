@@ -690,3 +690,19 @@ mod icon_tests {
         assert!(s.chunks(4).all(|p| p == [10, 20, 30, 255]));
     }
 }
+
+/// Ask Windows to draw this process's popup menus dark (right-click menus on the taskbar, desktop,
+/// Calculator, Notepad...). Explorer and Notepad use the same two uxtheme entry points, which are
+/// exported by number only: 135 SetPreferredAppMode(ForceDark = 2), 136 FlushMenuThemes.
+// ponytail: always dark, as the whole UI is; follow the system light/dark setting when a light theme exists
+pub unsafe fn dark_menus() {
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    let Ok(lib) = LoadLibraryW(windows::core::w!("uxtheme.dll")) else { return };
+    let by_number = |n: usize| GetProcAddress(lib, windows::core::PCSTR(n as *const u8));
+    if let (Some(set), Some(flush)) = (by_number(135), by_number(136)) {
+        let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set);
+        let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
+        set(2);
+        flush();
+    }
+}

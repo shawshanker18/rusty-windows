@@ -4,7 +4,6 @@
 // ponytail: primary monitor, rectangle only (no window / freeform modes, no editor, no delay);
 // add modes when someone asks for them.
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -14,8 +13,6 @@ use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::*;
-
-static BUSY: AtomicBool = AtomicBool::new(false);
 
 struct St {
     shot: HBITMAP, // the screen as it was
@@ -38,18 +35,6 @@ pub fn norm(a: (i32, i32), b: (i32, i32)) -> (i32, i32, i32, i32) {
 /// "Screenshot 2026-11-11 163455.png", the way Windows names them.
 pub fn file_name(y: u16, mo: u16, d: u16, h: u16, mi: u16, s: u16) -> String {
     format!("Screenshot {y:04}-{mo:02}-{d:02} {h:02}{mi:02}{s:02}.png")
-}
-
-/// Open the overlay on its own thread (the caller is the keyboard hook: it must not wait).
-pub fn start() {
-    if BUSY.swap(true, Relaxed) {
-        return;
-    }
-    std::thread::spawn(|| unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let _ = run();
-        BUSY.store(false, Relaxed);
-    });
 }
 
 /// `shellbits --snip`: the same overlay in a process of its own.
@@ -192,7 +177,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             // copy what is needed out before anything that sends messages
             let p = pt(); // where the button came up, not the last move seen
             let pick = ST.with(|s| s.borrow().as_ref().and_then(|st| st.from.map(|a| (st.shot, norm((a.x, a.y), (p.x, p.y))))));
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            // save BEFORE hiding: hiding deactivates the window, which closes it and frees the picture
             if let Some((shot, r)) = pick {
                 if r.2 - r.0 > 2 && r.3 - r.1 > 2 {
                     finish(hwnd, shot, r);

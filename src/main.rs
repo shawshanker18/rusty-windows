@@ -125,6 +125,14 @@ unsafe fn watchdog(args: &[String]) -> windows::core::Result<()> {
 
 fn main() -> windows::core::Result<()> {
     unsafe {
+        // a panic ends the whole process (release aborts): write down what and where first
+        std::panic::set_hook(Box::new(|info| {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(std::env::temp_dir().join("shellbits-crashes.txt")) {
+                let _ = writeln!(f, "panic: {info}");
+            }
+        }));
+        flyout::dark_menus();
         // test mode: render the Start menu to an image, touch nothing on screen
         let args: Vec<String> = std::env::args().collect();
         if args.get(1).map(String::as_str) == Some("--watchdog") {

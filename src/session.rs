@@ -339,7 +339,13 @@ pub fn hotkey(vk: u32, shift: bool) -> bool {
         match (vk as u8, shift) {
             (b'E', false) => open(w!("explorer.exe")),
             (b'I', false) => open(w!("ms-settings:")),
-            (b'S', true) => crate::snip::start(), // Windows' own overlay does not appear without Explorer
+            (b'S', true) => {
+                // Windows' own overlay does not appear without Explorer: ours, in a process of its
+                // own so that nothing in it can take the shell down
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("--snip").spawn();
+                }
+            }
             (b'D', false) => show_desktop(true),
             (b'M', false) => show_desktop(false),
             (b'L', false) => {
