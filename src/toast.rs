@@ -161,12 +161,13 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let (w_, h) = ((W * s) as i32, (H * s) as i32);
             let m = (16.0 * s) as i32;
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), wa.right - w_ - m, wa.bottom - h - m, w_, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
-            let _ = InvalidateRect(Some(hwnd), None, false);
+            let _ = UpdateWindow(hwnd);
+            crate::flyout::slide(&[hwnd], true); // rises in like Windows' banners
             SetTimer(Some(hwnd), T_HIDE, 5000, None);
         }
         WM_TIMER => {
             let _ = KillTimer(Some(hwnd), T_HIDE);
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            crate::flyout::slide(&[hwnd], false);
         }
         WM_LBUTTONUP => {
             let _ = ShowWindow(hwnd, SW_HIDE);

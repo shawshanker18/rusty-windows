@@ -866,7 +866,10 @@ unsafe fn toggle(hwnd: HWND, mode: Mode) {
         (wa.left + wa.right - w) / 2
     };
     let rest = wa.bottom - h - (GAP * s).round() as i32;
-    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, rest + (24.0 * s) as i32, w, h, SWP_SHOWWINDOW);
+    // rises from behind the taskbar like Windows' Start (curve measured from film: crate::flyout::open_offset)
+    let first = (crate::flyout::open_offset(0.0) * s).round() as i32;
+    let _ = SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, w, (wa.bottom - rest - first).clamp(0, h))), false);
+    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, rest + first, w, h, SWP_SHOWWINDOW);
     OPEN_ANIM.with(|a| a.set(Some((Instant::now(), rest))));
     SetTimer(Some(hwnd), T_OPEN, 8, None);
     SHOWN_AT.with(|t| t.set(Some(Instant::now())));
@@ -1159,13 +1162,16 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     return LRESULT(0);
                 };
                 let s = GetDpiForWindow(hwnd) as f32 / 96.0;
-                let p = (t0.elapsed().as_secs_f32() / 0.2).min(1.0);
-                let e = 1.0 - (1.0 - p) * (1.0 - p);
+                let off = (crate::flyout::open_offset(t0.elapsed().as_secs_f32() * 1000.0) * s).round() as i32;
                 let mut r = RECT::default();
                 let _ = GetWindowRect(hwnd, &mut r);
-                let y = rest + ((1.0 - e) * 24.0 * s).round() as i32;
-                let _ = SetWindowPos(hwnd, None, r.left, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                if p >= 1.0 {
+                let mut wa = RECT::default();
+                let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut wa as *mut _ as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+                let (w, h) = (r.right - r.left, r.bottom - r.top);
+                // the part below the top of the taskbar is cut off while it rises
+                let _ = SetWindowRgn(hwnd, if off > 0 { Some(CreateRectRgn(0, 0, w, (wa.bottom - rest - off).clamp(0, h))) } else { None }, true);
+                let _ = SetWindowPos(hwnd, None, r.left, rest + off, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                if off == 0 {
                     OPEN_ANIM.with(|a| a.set(None));
                     let _ = KillTimer(Some(hwnd), T_OPEN);
                 }

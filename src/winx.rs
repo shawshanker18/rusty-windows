@@ -267,7 +267,7 @@ unsafe fn make_gfx() -> windows::core::Result<Gfx> {
 unsafe fn draw_menu(g: &Gfx, list: &[Entry], hi: Option<usize>, w: f32) -> windows::core::Result<()> {
     let rt = &g.rt;
     let bg = crate::flyout::BG;
-    rt.Clear(Some(&D2D1_COLOR_F { r: bg.0, g: bg.1, b: bg.2, a: bg.3 }));
+    rt.Clear(Some(&crate::flyout::base(D2D1_COLOR_F { r: bg.0, g: bg.1, b: bg.2, a: bg.3 })));
     let white = rt.CreateSolidColorBrush(&rgb(0xFFFFFF), None)?;
     let line = rt.CreateSolidColorBrush(&rgb(0x3D3D3D), None)?;
     for (i, t, b) in rows(list) {

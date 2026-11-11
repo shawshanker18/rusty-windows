@@ -388,7 +388,7 @@ unsafe fn draw(st: &State, g: &Gfx) {
     let white = rgb(0xFFFFFF);
     if st.task {
         // ponytail: a flat grey like Windows shows over a dark wallpaper; it really is the wallpaper, blurred
-        rt.Clear(Some(&rgb(0x373737)));
+        rt.Clear(Some(&crate::flyout::base(rgb(0x373737)))); // Task View: the blurred desktop shows through, as in Windows
         let (aw, ah) = st.area;
         let strip = rect(10.0, ah - STRIP + 8.0, aw - 10.0, ah - 8.0);
         b.SetColor(&rgb(0x141414));
@@ -426,7 +426,7 @@ unsafe fn draw(st: &State, g: &Gfx) {
         }
         return;
     } else {
-        rt.Clear(Some(&C_BG));
+        rt.Clear(Some(&crate::flyout::base(C_BG)));
     }
     for (i, (it, c)) in st.items.iter().zip(&st.cards).enumerate() {
         let hov = st.hover.map(|h| h.0) == Some(i);
@@ -461,7 +461,8 @@ unsafe fn draw(st: &State, g: &Gfx) {
             }
         }
         if i == st.sel {
-            b.SetColor(&white);
+            // Windows outlines the chosen window in the accent colour, not white
+            b.SetColor(&rgb(0x4CC2FF));
             rt.DrawRoundedRectangle(&rrect(rect(c.left + 1.5, c.top + 1.5, c.right - 1.5, c.bottom - 1.5), 7.0), b, 3.0, None);
         }
     }
