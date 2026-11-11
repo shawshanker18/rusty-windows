@@ -104,27 +104,51 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let dc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
-            let bg = CreateSolidBrush(COLORREF(0x2C2C2C));
-            FillRect(dc, &rc, bg);
-            let _ = DeleteObject(bg.into());
             let s = GetDpiForWindow(hwnd) as f32 / 96.0;
             let src = HWND(TARGET.with(|t| t.get()).0 as *mut c_void);
             let mut buf = [0u16; 200];
             let n = GetWindowTextW(src, &mut buf) as usize;
-            let font = CreateFontW(-(12.0 * s) as i32, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
-            let old = SelectObject(dc, font.into());
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, COLORREF(0xFFFFFF));
-            let mut tr = RECT { left: (PAD * s) as i32, top: 0, right: rc.right - (PAD * s) as i32, bottom: (TITLE * s) as i32 };
-            DrawTextW(dc, &mut buf[..n], &mut tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            SelectObject(dc, old);
-            let _ = DeleteObject(font.into());
+            // Direct2D into a buffer that keeps alpha: Windows' blurred panel material shows through
+            use windows::Win32::UI::Controls::{BeginBufferedPaint, EndBufferedPaint, BPBF_TOPDOWNDIB, BPPF_ERASE, BP_PAINTPARAMS};
+            let params = BP_PAINTPARAMS { cbSize: size_of::<BP_PAINTPARAMS>() as u32, dwFlags: BPPF_ERASE, ..Default::default() };
+            let mut mem = HDC::default();
+            let pb = BeginBufferedPaint(dc, &rc, BPBF_TOPDOWNDIB, Some(&params), &mut mem);
+            if !mem.is_invalid() {
+                let _ = draw(mem, &rc, s, &String::from_utf16_lossy(&buf[..n]));
+                let _ = EndBufferedPaint(pb, true);
+            }
             let _ = EndPaint(hwnd, &ps);
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         _ => return DefWindowProcW(hwnd, msg, wp, lp),
     }
     LRESULT(0)
+}
+
+/// The preview's frame: see-through panel, window title on the top row (the thumbnail is DWM's).
+unsafe fn draw(dc: HDC, rc: &RECT, s: f32, title: &str) -> windows::core::Result<()> {
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use crate::flyout::{rect, utf16};
+    use crate::quick::rgb;
+    let f: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+    let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, ..Default::default() };
+    let rt = f.CreateDCRenderTarget(&props)?;
+    rt.BindDC(dc, rc)?;
+    rt.SetDpi(96.0 * s, 96.0 * s);
+    let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let fmt = dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0, w!(""))?;
+    fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+    fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+    let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
+    fmt.SetTrimming(&trim, None)?;
+    let w = rc.right as f32 / s;
+    rt.BeginDraw();
+    rt.Clear(Some(&crate::flyout::base(rgb(0x2C2C2C))));
+    rt.DrawText(&utf16(title), &fmt, &rect(PAD, 0.0, w - PAD, TITLE), &rt.CreateSolidColorBrush(&rgb(0xFFFFFF), None)?, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    rt.EndDraw(None, None)
 }
 
 pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
@@ -134,6 +158,7 @@ pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let (dark, round) = (1u32, 2u32);
     let _ = DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
     let _ = DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const c_void, 4);
+    let _ = crate::fluent_window(h); // Windows' blurred panel material
     PEEK.store(h.0 as isize, Relaxed);
     Ok(())
 }
