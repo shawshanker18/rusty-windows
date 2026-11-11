@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420" role="img" aria-label="Rusty Windows: the Windows 11 front end, rebuilt in Rust">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16110d"/>
+      <stop offset="1" stop-color="#2a1a10"/>
+    </linearGradient>
+    <linearGradient id="rust" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f08a4b"/>
+      <stop offset="1" stop-color="#b7410e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="420" rx="24" fill="url(#bg)"/>
+  <!-- four panes, one of them rusted through -->
+  <g transform="translate(90 105)">
+    <rect width="98" height="98" rx="8" fill="url(#rust)"/>
+    <rect x="110" width="98" height="98" rx="8" fill="url(#rust)" opacity=".85"/>
+    <rect y="110" width="98" height="98" rx="8" fill="url(#rust)" opacity=".7"/>
+    <rect x="110" y="110" width="98" height="98" rx="8" fill="none" stroke="#f08a4b" stroke-width="3" stroke-dasharray="10 8"/>
+  </g>
+  <text x="350" y="185" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="84" font-weight="700" fill="#fff4ea">Rusty Windows</text>
+  <text x="352" y="240" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="30" fill="#e9c9b2">The Windows 11 front end, rebuilt in Rust.</text>
+  <g font-family="Segoe UI, Inter, Arial, sans-serif" font-size="22" fill="#16110d" font-weight="600">
+    <rect x="352" y="275" width="250" height="44" rx="22" fill="#f08a4b"/>
+    <text x="477" y="304" text-anchor="middle">about 50% less shell RAM</text>
+    <rect x="618" y="275" width="190" height="44" rx="22" fill="#f08a4b"/>
+    <text x="713" y="304" text-anchor="middle">one small .exe</text>
+    <rect x="824" y="275" width="230" height="44" rx="22" fill="#f08a4b"/>
+    <text x="939" y="304" text-anchor="middle">22,700 lines of Rust</text>
+  </g>
+</svg>

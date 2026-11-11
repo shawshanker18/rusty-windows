@@ -1,0 +1,90 @@
+[package]
+name = "shellbits"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+windows-collections = "0.2"
+windows-core = "0.61"
+windows-numerics = "0.2"
+serde_json = "1"
+
+[dependencies.windows]
+version = "0.61"
+features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Controls",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Imaging",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_WinRT",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_Accessibility",
+  "Win32_System_Ole",
+  "Win32_Security_Authentication_Identity",
+  "Win32_System_Power",
+  "Win32_System_Registry",
+  "Win32_Storage_Packaging_Appx",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
+  "Win32_System_IO",
+  "Win32_System_Memory",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Storage_EnhancedStorage",
+  "Win32_Globalization",
+  "Win32_System_SystemInformation",
+  "Win32_NetworkManagement_WiFi",
+  "Win32_System_Wmi",
+  "Win32_System_Rpc",
+  "Devices_Radios",
+  "Devices_Bluetooth",
+  "Devices_Enumeration",
+  "Foundation_Collections",
+  "Win32_System_Shutdown",
+  "Win32_System_Variant",
+  "Win32_UI_Shell_Common",
+  "Win32_Security",
+  "Storage_Streams",
+  "UI",
+  "UI_ViewManagement",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Foundation",
+  "Media_Control",
+  "ApplicationModel",
+  "ApplicationModel_DataTransfer",
+  "UI_Notifications",
+  "UI_Notifications_Management",
+  "UI_Shell",
+  "Win32_System_DataExchange",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Performance",
+  "Win32_System_Environment",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Time",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

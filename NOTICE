@@ -1,0 +1,19 @@
+Rusty Windows
+Copyright (c) 2026 shawshanker18 and the Rusty Windows contributors. MIT licence, see LICENSE.
+
+Third-party material
+
+Lucide icons (https://lucide.dev): some icon outlines in src/lucide.rs are taken from Lucide.
+ISC License. Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of
+Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without
+fee is hereby granted, provided that the above copyright notice and this permission notice appear
+in all copies. THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD
+TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+
+Rust crates (windows, windows-core, windows-collections, windows-numerics, serde_json and their
+dependencies) are used under their own MIT or Apache-2.0 licences.
+
+Not affiliated with or endorsed by Microsoft or Anthropic. Windows is a trademark of Microsoft
+Corporation. Claude is a trademark of Anthropic, PBC.

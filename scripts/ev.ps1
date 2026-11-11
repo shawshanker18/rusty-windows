@@ -1,0 +1,1 @@
+Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-20)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'shellbits' } | Select-Object -First 6 | ForEach-Object { "$($_.TimeCreated) [$($_.ProviderName) $($_.Id)] " + (($_.Message -split "`n" | Select-Object -First 8) -join ' / ') }

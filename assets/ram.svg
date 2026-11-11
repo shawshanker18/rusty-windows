@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 380" width="1000" height="380" role="img" aria-label="Memory: Windows front end 717 MB, Rusty Windows as the shell 355 MB">
+  <rect width="1000" height="380" rx="18" fill="#16110d"/>
+  <g font-family="Segoe UI, Inter, Arial, sans-serif" fill="#fff4ea">
+    <text x="40" y="52" font-size="26" font-weight="700">Front-end memory on the same PC (private MB, measured)</text>
+
+    <text x="40" y="112" font-size="20">Windows 11 shell (Explorer, Start, Search, ShellExperienceHost, text input)</text>
+    <rect x="40" y="124" width="860" height="40" rx="6" fill="#6b7785"/>
+    <text x="912" y="152" font-size="22" font-weight="700">717</text>
+
+    <text x="40" y="208" font-size="20">Rusty Windows as the shell, 1080p video wallpaper playing (+ the two Windows hosts still loaded)</text>
+    <rect x="40" y="220" width="426" height="40" rx="6" fill="#f08a4b"/>
+    <text x="478" y="248" font-size="22" font-weight="700">355</text>
+
+    <text x="40" y="304" font-size="20">Rusty Windows core only, no video wallpaper</text>
+    <rect x="40" y="316" width="100" height="40" rx="6" fill="#f08a4b"/>
+    <text x="152" y="344" font-size="22" font-weight="700">62 to 83</text>
+  </g>
+</svg>
