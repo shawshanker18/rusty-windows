@@ -63,10 +63,55 @@ shortcuts and the way back are in [SETUP.md](SETUP.md).
 
 ## The goal
 
-Rewrite in Rust everything on a Windows PC that can be replaced without reflashing the firmware:
-the whole shell, every built-in app and dialog, the system components behind them and, in the long
-run, the parts loaded from disk at boot. The full list, with status and difficulty for each item,
-is in [GOALS.md](GOALS.md).
+Rewrite in Rust everything on a Windows PC that can be replaced without reflashing the firmware.
+Ticked items are built and in daily use; "partial" items work but are incomplete. Status and
+difficulty for every line are in [GOALS.md](GOALS.md).
+
+**The shell**
+- [x] Taskbar, Start, Search, system tray
+- [x] Quick Settings and its pages, volume mixer
+- [x] Notification center, calendar, toasts
+- [x] Volume, media and lock-key flyouts
+- [x] Alt+Tab, Win+X menu, Run box
+- [x] Snap layouts, Snap Assist, Win+arrow snapping
+- [x] Input language switcher, desktop icons, show desktop, hover previews
+- [x] Shell mode with crash watchdog and a one-key way back
+- [ ] Task View (partial), virtual desktops
+- [ ] Clipboard history (text only), emoji panel (no GIFs or symbols)
+- [ ] Pinned taskbar apps, desktop right-click menu, drag and drop
+- [ ] Touch keyboard, handwriting, voice typing, input method editors
+- [ ] Widgets, gestures, multi-monitor taskbars, light theme, acrylic and animations
+
+**Built-in apps**
+- [x] Settings, every top-level page
+- [x] Calculator, Standard and Scientific
+- [ ] Settings sub-pages (partial), Control Panel
+- [ ] File Explorer (partial: tabs, preview, commands), Open and Save dialogs
+- [ ] Notepad (partial: no tabs or spell check)
+- [ ] Task Manager, Snipping Tool, Photos, Media Player, Paint, Terminal
+- [ ] Clock, Sound Recorder, Camera, Sticky Notes, Magnifier, On-Screen Keyboard
+- [ ] Registry Editor, Event Viewer, Services, Device Manager, Disk Management, Task Scheduler
+- [ ] Resource Monitor, Remote Desktop, Store, Windows Security dashboard, Game Bar
+
+**System dialogs and screens**
+- [ ] Message boxes, Properties, Open with, copy progress, context menus
+- [ ] Wi-Fi, VPN, Bluetooth, Project, Cast, Share and Print prompts
+- [ ] Lock screen, sign-in screen, UAC prompt, Ctrl+Alt+Del, first-run setup, update screens
+
+**Apps from others**
+- [ ] Claude Code window (partial), a browser window, a Spotify window
+
+**Behind the front end**
+- [ ] Notification host, search indexer, text input host, console host
+- [ ] Thumbnail and icon caches, shell extensions, print spooler, audio and font services
+- [ ] Desktop Window Manager, session and service control, the window manager itself
+
+**Kernel mode and boot** (loaded from disk, so still no firmware flash)
+- [ ] File-system, network, input, audio, display and storage drivers
+- [ ] Boot manager, OS loader, recovery environment
+- [ ] The NT kernel and hardware abstraction layer
+
+Out of scope: UEFI/BIOS, the embedded controller, Intel ME / AMD PSP, device firmware, microcode.
 
 ## Honest status
 
