@@ -683,6 +683,63 @@ fn lock_background() -> String {
     if spotlight { "Windows spotlight".into() } else { "Picture".into() }
 }
 
+// Bluetooth & devices > Devices
+fn bt_list() -> Vec<crate::qsx::Item> {
+    crate::qsx::bt_devices().into_iter().map(|mut d| { d.key = format!("wifi\t{}", d.key); d }).collect() // "wifi" = no app icon
+}
+/// Connecting and removing a paired device go through Windows' own Bluetooth page.
+// ponytail: connect/remove need the Bluetooth pairing API per device; until then the button opens Windows' page
+fn bt_manage(_id: &str, _name: &str) {
+    crate::quick::open("ms-settings:bluetooth");
+}
+
+// Printers
+const DEVICES: &str = "Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices";
+/// The default printer is the first part of "name,winspool,Ne00:".
+pub fn default_printer_of(device_value: &str) -> String {
+    device_value.split(',').next().unwrap_or("").trim().to_string()
+}
+fn printers() -> Vec<crate::qsx::Item> {
+    let default = default_printer_of(&reg_str(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows"), w!("Device")));
+    let mut out: Vec<crate::qsx::Item> = unsafe { reg_values(HKEY_CURRENT_USER, DEVICES) }
+        .into_iter()
+        .map(|(name, port)| {
+            let on = name == default;
+            let kind = if port.to_lowercase().contains("nul:") { "Saves to a file" } else { "Printer" };
+            crate::qsx::Item { sub: if on { format!("{kind}  |  Default") } else { kind.into() }, on, key: format!("wifi\t{name}"), name, ..Default::default() }
+        })
+        .collect();
+    out.sort_by(|a, b| b.on.cmp(&a.on).then(a.name.cmp(&b.name)));
+    out
+}
+/// Windows' own printer tool sets the default printer (`/y`).
+fn make_default_printer(_id: &str, name: &str) {
+    let mut cmd: Vec<u16> = format!("rundll32.exe printui.dll,PrintUIEntry /y /n \"{name}\"").encode_utf16().chain([0]).collect();
+    unsafe {
+        use windows::Win32::System::Threading::*;
+        let si = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+        let mut pi = PROCESS_INFORMATION::default();
+        if CreateProcessW(None, Some(windows::core::PWSTR(cmd.as_mut_ptr())), None, None, false, PROCESS_CREATION_FLAGS(0), None, None, &si, &mut pi).is_ok() {
+            let _ = WaitForSingleObject(pi.hProcess, 8000);
+            let _ = CloseHandle(pi.hThread);
+            let _ = CloseHandle(pi.hProcess);
+        }
+    }
+}
+reg_switch!(printer_auto_default, set_printer_auto_default, "Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows", "LegacyDefaultPrinterMode", on = 0, off = 1, missing = true);
+
+// Touchpad (Windows' precision touchpad settings for this user)
+const PTP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\PrecisionTouchPad";
+reg_switch!(tp_taps, set_tp_taps, PTP, "TapsEnabled", on = 1, off = 0, missing = true);
+reg_switch!(tp_two_finger_tap, set_tp_two_finger_tap, PTP, "TwoFingerTapEnabled", on = 1, off = 0, missing = true);
+reg_switch!(tp_drag, set_tp_drag, PTP, "TapAndDrag", on = 1, off = 0, missing = true);
+reg_switch!(tp_right_zone, set_tp_right_zone, PTP, "RightClickZoneEnabled", on = 1, off = 0, missing = true);
+reg_switch!(tp_scroll, set_tp_scroll, PTP, "PanEnabled", on = 1, off = 0, missing = true);
+reg_switch!(tp_zoom, set_tp_zoom, PTP, "ZoomEnabled", on = 1, off = 0, missing = true);
+reg_switch!(tp_with_mouse, set_tp_with_mouse, PTP, "LeaveOnWithMouse", on = 1, off = 0, missing = true);
+reg_choice!(tp_sensitivity, tp_sensitivities, set_tp_sensitivity, PTP, "AAPThreshold",
+    [("Most sensitive", 0), ("High sensitivity", 1), ("Medium sensitivity", 2), ("Low sensitivity", 3)], missing = 2);
+
 // Storage
 reg_switch!(storage_sense, set_storage_sense, "Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy", "01", on = 1, off = 0, missing = false);
 
@@ -1471,13 +1528,13 @@ fn pages() -> Vec<Page> {
             r(0, "", "", Center("View more devices", "ms-settings:connecteddevices")),
             r(0xE702, "Bluetooth", discoverable(), Toggle(bluetooth, set_bluetooth)),
             r(0, "", "", Space(16.33)),
-            r(0xE772, "Devices", "Mouse, keyboard, pen, audio, displays and docks, other devices", LinkBtn("ms-settings:connecteddevices", "Add device", "ms-settings-connectabledevices:devicediscovery")),
-            r(0xE749, "Printers & scanners", "Preferences", Link("ms-settings:printers")),
+            r(0xE772, "Devices", "Mouse, keyboard, pen, audio, displays and docks, other devices", LinkBtn("Devices", "Add device", "ms-settings-connectabledevices:devicediscovery")),
+            r(0xE749, "Printers & scanners", "Preferences", Sub("Printers & scanners")),
             r(0xE1C9, "Mobile devices", "Instantly access your mobile devices from your PC", Link("ms-settings:mobile-devices")),
             r(0xE722, "Cameras", "Connected cameras, default image settings", Link("ms-settings:camera")),
             r(0xE962, "Mouse", "Buttons, mouse pointer speed, scrolling", Sub("Mouse")),
             r(0xE962, "Mouse pointer speed", "", Slider(mouse_speed, set_mouse_speed)),
-            r(0xEFA5, "Touchpad", "Taps, gestures, scrolling, zooming", Link("ms-settings:devices-touchpad")),
+            r(0xEFA5, "Touchpad", "Taps, gestures, scrolling, zooming", Sub("Touchpad")),
         ]),
         top("Network & internet", 0xE701, vec![
             r(0, "", "", NetHero(connection)),
@@ -1507,6 +1564,30 @@ fn pages() -> Vec<Page> {
             r(0xE790, "Choose your mode", "Change the colors that appear in Windows and your apps", Choice(color_mode, color_modes, set_color_mode)),
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
+        ]),
+        sub("Devices", "Bluetooth & devices", vec![
+            r(0, "Bluetooth devices", "", Header),
+            r(0, "", "", Actions(bt_list, "Manage", bt_manage)),
+            r(0xE710, "Add device", "Pair a new Bluetooth or other device, in Windows' own page", Link("ms-settings-connectabledevices:devicediscovery")),
+        ]),
+        sub("Printers & scanners", "Bluetooth & devices", vec![
+            r(0, "", "", Actions(printers, "Set as default", make_default_printer)),
+            r(0, "Printer preferences", "", Header),
+            r(0xE749, "Let Windows manage my default printer", "The default is the printer you used most recently at your current location", Toggle(printer_auto_default, set_printer_auto_default)),
+            r(0xE710, "Add a printer or scanner", "In Windows' own page", Link("ms-settings:printers")),
+        ]),
+        sub("Touchpad", "Bluetooth & devices", vec![
+            r(0xEFA5, "Leave touchpad on when a mouse is connected", "", Toggle(tp_with_mouse, set_tp_with_mouse)),
+            r(0, "Taps", "", Header),
+            r(0xEFA5, "Touchpad sensitivity", "", Choice(tp_sensitivity, tp_sensitivities, set_tp_sensitivity)),
+            r(0xEFA5, "Tap with a single finger to single-click", "", Toggle(tp_taps, set_tp_taps)),
+            r(0xEFA5, "Tap with two fingers to right-click", "", Toggle(tp_two_finger_tap, set_tp_two_finger_tap)),
+            r(0xEFA5, "Tap twice and drag to multi-select", "", Toggle(tp_drag, set_tp_drag)),
+            r(0xEFA5, "Press the lower right corner of the touchpad to right-click", "", Toggle(tp_right_zone, set_tp_right_zone)),
+            r(0, "Scroll & zoom", "", Header),
+            r(0xEC8F, "Drag two fingers to scroll", "", Toggle(tp_scroll, set_tp_scroll)),
+            r(0xE8A3, "Pinch to zoom", "", Toggle(tp_zoom, set_tp_zoom)),
+            r(0xEFA5, "Gestures, scroll direction and more", "Windows applies touchpad changes made here the next time the touchpad driver reads them; Windows' own page applies them at once", Link("ms-settings:devices-touchpad")),
         ]),
         sub("Background", "Personalization", vec![
             r(0xEB9F, "Current picture", "", Info(wallpaper_text)),
@@ -2353,7 +2434,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                     }
                     rt.FillRoundedRectangle(&rrect(c, 4.0), &b(if hover == Some(Hit::Sender(i, k)) { 0x323232 } else { 0x2B2B2B })?);
                     rt.DrawRoundedRectangle(&rrect(rect(c.left + 0.5, c.top + 0.5, c.right - 0.5, c.bottom - 0.5), 4.0), &b(0x1D1D1D)?, 1.0, None);
-                    let px = APP_ICONS.with(|m| m.borrow_mut().entry(id.clone()).or_insert_with(|| crate::files::image(&icon_source(id), 24, windows::Win32::UI::Shell::SIIGBF_ICONONLY).filter(|i| i.0 == 24 && i.1 == 24).map(|i| i.2).unwrap_or_default()).clone());
+                    let px = APP_ICONS.with(|m| m.borrow_mut().entry(id.clone()).or_insert_with(|| Some(icon_source(id)).filter(|f| !f.is_empty()).and_then(|f| crate::files::image(&f, 24, windows::Win32::UI::Shell::SIIGBF_ICONONLY).filter(|i| i.0 == 24 && i.1 == 24)).map(|i| i.2).unwrap_or_default()).clone());
                     if px.len() == 24 * 24 * 4 {
                         if let Ok(bm) = rt.CreateBitmap(D2D_SIZE_U { width: 24, height: 24 }, Some(px.as_ptr() as *const c_void), 96, &bp) {
                             crate::flyout::draw_icon(&rt, &bm, c.left + 16.0, c.top + 22.0, 24.0);
@@ -2840,6 +2921,12 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                                 load(page); // show what Windows actually did
                             });
                         }
+                        // a card that names one of our own pages (not an ms-settings: address) opens that page
+                        Kind::LinkBtn(name, ..) if !name.contains(':') => {
+                            if let Some(p) = page_index(name) {
+                                go(p);
+                            }
+                        }
                         Kind::Link(uri) | Kind::Expand(uri) | Kind::LinkBtn(uri, ..) => {
                             windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &HSTRING::from(uri), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
                         }
@@ -2981,6 +3068,12 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_printer_value() {
+        assert_eq!(default_printer_of("HPDE4E14 (HP Smart Tank 510 series),winspool,Ne00:"), "HPDE4E14 (HP Smart Tank 510 series)");
+        assert_eq!(default_printer_of(""), "");
+    }
 
     #[test]
     fn fits_and_theme_names() {
