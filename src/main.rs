@@ -123,6 +123,76 @@ unsafe fn watchdog(args: &[String]) -> windows::core::Result<()> {
     Ok(())
 }
 
+/// Send an "open this app" request to the apps process, starting it if it is not running.
+unsafe fn open_app(id: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    if let Ok(h) = FindWindowW(w!("shellbits_apps"), None) {
+        let mut pid = 0;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        let _ = AllowSetForegroundWindow(pid); // we hold the right to come to the front (the key press): pass it on
+        let _ = PostMessageW(Some(h), WM_HOTKEY, WPARAM(id as usize), LPARAM(0));
+    } else if let Ok(exe) = std::env::current_exe() {
+        if let Ok(child) = std::process::Command::new(exe).arg("--apps").arg(id.to_string()).spawn() {
+            let _ = AllowSetForegroundWindow(child.id());
+        }
+    }
+}
+
+const APP_CLASSES: [windows::core::PCWSTR; 5] = [w!("shellbits_files"), w!("shellbits_settings"), w!("shellbits_calc"), w!("shellbits_notepad"), w!("shellbits_claude")];
+
+unsafe extern "system" fn apps_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_HOTKEY => {
+            if let Ok(m) = GetModuleHandleW(None) {
+                let inst = m.into();
+                match wp.0 as i32 {
+                    FILES_ID => files::show(inst, files::take_request()),
+                    NOTEPAD_ID => notepad::show(inst, notepad::take_request()),
+                    CALC_ID => calc::show(inst),
+                    SETTINGS_ID => settings::show(inst),
+                    CLAUDE_ID => claude::show(inst),
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
+        // nothing open any more: leave, so closed apps cost no memory
+        WM_TIMER => {
+            if !APP_CLASSES.iter().any(|c| FindWindowW(*c, None).is_ok()) {
+                PostQuitMessage(0);
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+/// `shellbits --apps <id>`: the process that owns the app windows.
+// ponytail: two requests in the same instant can start two of these (each then owns its own windows);
+// add a named mutex if that is ever seen
+unsafe fn apps_host(first: Option<i32>) -> windows::core::Result<()> {
+    if let (Ok(h), Some(id)) = (FindWindowW(w!("shellbits_apps"), None), first) {
+        let _ = PostMessageW(Some(h), WM_HOTKEY, WPARAM(id as usize), LPARAM(0));
+        return Ok(());
+    }
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    BufferedPaintInit()?;
+    let inst: HINSTANCE = GetModuleHandleW(None)?.into();
+    RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(apps_proc), hInstance: inst, lpszClassName: w!("shellbits_apps"), ..Default::default() });
+    let h = CreateWindowExW(WS_EX_TOOLWINDOW, w!("shellbits_apps"), w!(""), WS_POPUP, 0, 0, 0, 0, None, None, Some(inst), None)?;
+    if let Some(id) = first {
+        let _ = PostMessageW(Some(h), WM_HOTKEY, WPARAM(id as usize), LPARAM(0));
+    }
+    SetTimer(Some(h), 1, 3000, None);
+    let mut msg = MSG::default();
+    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        let _ = TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    Ok(())
+}
+
 fn main() -> windows::core::Result<()> {
     unsafe {
         // a panic ends the whole process (release aborts): write down what and where first
@@ -141,6 +211,9 @@ fn main() -> windows::core::Result<()> {
         if args.get(1).map(String::as_str) == Some("--snapshot-qs") {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             return quick::snapshot(args.get(2).map(String::as_str).unwrap_or("qs.bmp"), args.get(3).map(String::as_str).unwrap_or(""));
+        }
+        if args.get(1).map(String::as_str) == Some("--apps") {
+            return apps_host(args.get(2).and_then(|a| a.parse().ok()));
         }
         if args.get(1).map(String::as_str) == Some("--snip") {
             return snip::run_now();
@@ -481,7 +554,10 @@ fn main() -> windows::core::Result<()> {
         std::thread::spawn(|| {
             let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
             loop {
-                launcher::update_search_rect();
+                // Explorer's taskbar buttons; as the shell the taskbar is ours and reports its own
+                if !session::SHELL.load(Relaxed) {
+                    launcher::update_search_rect();
+                }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
         });
@@ -551,34 +627,10 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     std::thread::spawn(|| session::show_desktop(true));
                     return LRESULT(0);
                 }
-                FILES_ID => {
-                    if let Ok(m) = GetModuleHandleW(None) {
-                        files::show(m.into(), files::take_request());
-                    }
-                    return LRESULT(0);
-                }
-                NOTEPAD_ID => {
-                    if let Ok(m) = GetModuleHandleW(None) {
-                        notepad::show(m.into(), notepad::take_request());
-                    }
-                    return LRESULT(0);
-                }
-                CALC_ID => {
-                    if let Ok(m) = GetModuleHandleW(None) {
-                        calc::show(m.into());
-                    }
-                    return LRESULT(0);
-                }
-                SETTINGS_ID => {
-                    if let Ok(m) = GetModuleHandleW(None) {
-                        settings::show(m.into());
-                    }
-                    return LRESULT(0);
-                }
-                CLAUDE_ID => {
-                    if let Ok(m) = GetModuleHandleW(None) {
-                        claude::show(m.into());
-                    }
+                // the app windows live in a process of their own: a fault in File Explorer, Settings,
+                // Calculator, Notepad or the Claude window can then never take the taskbar down
+                FILES_ID | NOTEPAD_ID | CALC_ID | SETTINGS_ID | CLAUDE_ID => {
+                    open_app(id);
                     return LRESULT(0);
                 }
                 RESTORE_ID => {

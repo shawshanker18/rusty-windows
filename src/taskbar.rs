@@ -581,6 +581,19 @@ unsafe fn paint(hwnd: HWND) {
             if draw(&mut st, mem, &rc, GetDpiForWindow(hwnd) as f32).is_err() {
                 st.gfx = None;
             }
+            // As the shell there is no Explorer search box to measure, so say where OURS is (screen
+            // pixels): the launcher puts the box you type in exactly there. Without this the typed
+            // text was never shown in shell mode.
+            if crate::session::SHELL.load(Relaxed) {
+                let sc = GetDpiForWindow(hwnd) as f32 / 96.0;
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut wr);
+                let sx = center_x(&st, (wr.right - wr.left) as f32 / sc) + START_W + GAP;
+                let px = |v: f32| (v * sc).round() as i32;
+                for (a, v) in crate::launcher::ZONES[1].iter().zip([wr.left + px(sx), wr.top + px(8.0), wr.left + px(sx + SEARCH_W), wr.top + px(40.0)]) {
+                    a.store(v, Relaxed);
+                }
+            }
         });
         let _ = EndBufferedPaint(pb, true);
     }
