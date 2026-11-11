@@ -186,13 +186,23 @@ unsafe fn paint(hwnd: HWND) {
     let hdc = BeginPaint(hwnd, &mut ps);
     let mut rc = RECT::default();
     let _ = GetClientRect(hwnd, &mut rc);
+    // drawn into a buffer that keeps its alpha channel, so the blurred backdrop shows through
+    use windows::Win32::UI::Controls::{BeginBufferedPaint, EndBufferedPaint, BPBF_TOPDOWNDIB, BPPF_ERASE, BP_PAINTPARAMS};
+    let params = BP_PAINTPARAMS { cbSize: size_of::<BP_PAINTPARAMS>() as u32, dwFlags: BPPF_ERASE, ..Default::default() };
+    let mut mem = HDC::default();
+    let pb = BeginBufferedPaint(hdc, &rc, BPBF_TOPDOWNDIB, Some(&params), &mut mem);
+    if mem.is_invalid() {
+        let _ = EndBufferedPaint(pb, true);
+    let _ = EndPaint(hwnd, &ps);
+        return;
+    }
     let dpi = GetDpiForWindow(hwnd) as f32;
     ST.with(|s| {
         let mut st = s.borrow_mut();
         if st.gfx.is_none() {
             st.gfx = (|| -> windows::core::Result<_> {
                 let f: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-                let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE }, ..Default::default() };
+                let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, ..Default::default() };
                 let rt = f.CreateDCRenderTarget(&props)?;
                 let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
                 let glyphs = dw.CreateTextFormat(w!("Segoe UI Emoji"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 24.0, w!("en-us"))?;
@@ -213,10 +223,10 @@ unsafe fn paint(hwnd: HWND) {
             Ok(f)
         })() else { return };
         let ok = (|| -> windows::core::Result<()> {
-            rt.BindDC(hdc, &rc)?;
+            rt.BindDC(mem, &rc)?;
             rt.SetDpi(dpi, dpi);
             rt.BeginDraw();
-            rt.Clear(Some(&rgb(0x2C2C2C)));
+            rt.Clear(Some(&crate::flyout::base(rgb(0x2C2C2C))));
             let b = rt.CreateSolidColorBrush(&rgb(0xFFFFFF), None)?;
             rt.DrawText(&utf16("Emoji"), &title, &rect(PAD + 4.0, 0.0, W, TITLE), &b, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             // one button per block, showing its first emoji; the block you are looking at is underlined
@@ -425,6 +435,7 @@ pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let (dark, round) = (1u32, 2u32);
     let _ = DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
     let _ = DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const c_void, 4);
+    let _ = crate::fluent_window(h); // Windows' blurred panel material, like the other flyouts
     EMOJI.store(h.0 as isize, Relaxed);
     Ok(())
 }

@@ -686,6 +686,18 @@ fn app_sessions() -> std::collections::HashMap<String, AppInfo> {
     out
 }
 
+/// Each session's state as the app last summed it up (completed / review_ready / blocked), by id.
+static STATUS: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+
+/// The dot at the right of a sidebar row: waiting for you (blue), stuck (amber), or none.
+pub fn status_dot(status: &str) -> Option<u32> {
+    match status {
+        "review_ready" => Some(0x4CC2FF),
+        "blocked" => Some(0xF2B04D),
+        _ => None,
+    }
+}
+
 /// Sessions the app has starred: they show under Pinned, with the ones pinned in this window.
 static STARRED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -733,7 +745,9 @@ pub fn scan_sessions() -> Vec<SessionInfo> {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(cache, sessions_to_text(&out));
-    let (out, starred) = overlay(out, &app_sessions());
+    let app = app_sessions();
+    *STATUS.lock().unwrap() = Some(app.iter().map(|(id, a)| (id.clone(), a.status.clone())).collect());
+    let (out, starred) = overlay(out, &app);
     *STARRED.lock().unwrap() = starred;
     out
 }
@@ -994,6 +1008,7 @@ enum Act {
     MoreOutputs,   // "Show more" / "Show less" under the Outputs list
     Web(u8),  // claude.ai pages the CLI doesn't cover
     Tool(u8), // top-right tools: terminal, diff, browser, folder, more
+    Gear, // the settings button in the account row
     Min,
     Max,
     Close,
@@ -1515,7 +1530,11 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
             if sel || hov(Act::Session(i)) {
                 rt.FillRoundedRectangle(&rrect(r, 6.0), &b(if sel { C_SEL } else { C_HOVER })?);
             }
-            txt(&sessions[i].title, &g.side, rect(18.0, y, SIDE - 20.0, y + 32.0), &white);
+            let dot = STATUS.lock().unwrap().as_ref().and_then(|m| m.get(&sessions[i].id).and_then(|st| status_dot(st)));
+            txt(&sessions[i].title, &g.side, rect(18.0, y, SIDE - if dot.is_some() { 34.0 } else { 20.0 }, y + 32.0), &white);
+            if let Some(c) = dot {
+                rt.FillEllipse(&D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: SIDE - 22.0, Y: y + 16.0 }, radiusX: 3.5, radiusY: 3.5 }, &b(c)?);
+            }
             hits.push((r, Act::Session(i)));
             y += 34.0;
         }
@@ -1527,7 +1546,12 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
     let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
     txt(&initial, &g.small, rect(23.0, ch - 41.0, 40.0, ch - 19.0), &white);
     txt(&name, &g.side, rect(48.0, ch - 44.0, 220.0, ch - 16.0), &white);
+    let gear = rect(222.0, ch - 46.0, 258.0, ch - 14.0);
+    if ui.hover == Some(Act::Gear) {
+        rt.FillRoundedRectangle(&rrect(gear, 4.0), &b(0x2A2A2A)?);
+    }
     lucide(rt, "settings", rect(226.0, ch - 44.0, 254.0, ch - 16.0), 18.0, &soft);
+    hits.push((gear, Act::Gear));
 
     // ---- title bar ----
     rt.FillRectangle(&rect(SIDE + 1.0, TOP - 1.0, cw, TOP), &b(C_TOPLINE)?);
@@ -2137,6 +2161,45 @@ unsafe fn submit(edit: HWND) {
     send(text);
 }
 
+/// The account row's settings menu: what the real app offers there that this window can do.
+unsafe fn gear_menu(hwnd: HWND) {
+    let creds = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude").join(".credentials.json");
+    let signed_in = plan_signed_in(&std::fs::read_to_string(&creds).unwrap_or_default());
+    let items: [(&str, &str); 7] = [
+        ("Settings", "settings"),
+        (if signed_in { "Signed in to your Claude plan" } else { "Sign in with your Claude plan..." }, "login"),
+        ("Open Claude Code settings file", "file"),
+        ("Keyboard shortcuts", "keys"),
+        ("Get help", "help"),
+        ("Learn more", "learn"),
+        ("About this window", "about"),
+    ];
+    let Some(pick) = menu(hwnd, &items, "") else { return };
+    let open = |what: &str, args: &str| {
+        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(what), &windows::core::HSTRING::from(args), PCWSTR::null(), SW_SHOWNORMAL);
+    };
+    let say = |title: &str, text: &str| {
+        MessageBoxW(Some(hwnd), &windows::core::HSTRING::from(text), &windows::core::HSTRING::from(title), MB_OK | MB_ICONINFORMATION);
+    };
+    match pick.as_str() {
+        "settings" => open("https://claude.ai/settings", ""),
+        // signing in is the user's own step: it opens a terminal with Claude Code's own sign-in, which asks in the browser
+        "login" if !signed_in => open("cmd.exe", &format!("/k \"{}\" auth login", claude_exe())),
+        "login" => say("Claude plan", "The claude tool is signed in to a Claude account, so this window uses your plan."),
+        "file" => {
+            let f = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude").join("settings.json");
+            crate::notepad::request(&f.display().to_string());
+            if let Ok(fly) = FindWindowW(w!("shellbits_flyout"), None) {
+                let _ = PostMessageW(Some(fly), WM_HOTKEY, WPARAM(crate::NOTEPAD_ID as usize), LPARAM(0));
+            }
+        }
+        "keys" => say("Keyboard shortcuts", "Enter  send\nShift+Enter  new line\nCtrl+Alt+C  open this window\nWheel over the list  scroll sessions\nRight-click a session  pin, rename, open folder\nRight-click a message  copy"),
+        "help" => open("https://support.claude.com", ""),
+        "learn" => open("https://docs.claude.com/en/docs/claude-code/overview", ""),
+        _ => say("About", "Claude Code window from Rusty Windows.\nIt runs the official claude tool; your sessions are shared with the Claude app."),
+    }
+}
+
 unsafe fn menu(hwnd: HWND, items: &[(&str, &str)], current: &str) -> Option<String> {
     let m = CreatePopupMenu().ok()?;
     for (k, (label, value)) in items.iter().enumerate() {
@@ -2315,6 +2378,7 @@ unsafe fn click(hwnd: HWND, act: Act) {
                 windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
             }
         }
+        Act::Gear => gear_menu(hwnd),
         Act::Web(k) => {
             let url = ["https://claude.ai/artifacts", "https://claude.ai/code/scheduled", "https://claude.ai/settings"][k as usize % 3];
             windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
@@ -2886,6 +2950,9 @@ mod tests {
         assert_eq!(list.iter().map(|s| (s.id.as_str(), s.title.as_str())).collect::<Vec<_>>(), [("abc", "Part 1"), ("other", "old")]);
         assert_eq!(list[0].cwd, "C:/Users/me/Desktop/proj");
         assert_eq!(starred, ["abc"]);
+        assert_eq!(status_dot("review_ready"), Some(0x4CC2FF));
+        assert_eq!(status_dot("blocked"), Some(0xF2B04D));
+        assert_eq!(status_dot("completed"), None);
         // the newest folder wins; lines without one, or broken ones, are skipped
         let log = "{\"type\":\"user\",\"cwd\":\"C:/scratch\"}
 {\"type\":\"assistant\"}

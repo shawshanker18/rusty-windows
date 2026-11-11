@@ -602,7 +602,7 @@ fn main() -> windows::core::Result<()> {
 }
 
 /// Dark, rounded, acrylic-backed window like Windows 11 flyouts.
-unsafe fn fluent_window(h: HWND) -> windows::core::Result<()> {
+pub(crate) unsafe fn fluent_window(h: HWND) -> windows::core::Result<()> {
     let set = |attr: DWMWINDOWATTRIBUTE, v: u32| {
         let _ = DwmSetWindowAttribute(h, attr, &v as *const _ as *const c_void, 4);
     };
