@@ -740,6 +740,69 @@ reg_switch!(tp_with_mouse, set_tp_with_mouse, PTP, "LeaveOnWithMouse", on = 1, o
 reg_choice!(tp_sensitivity, tp_sensitivities, set_tp_sensitivity, PTP, "AAPThreshold",
     [("Most sensitive", 0), ("High sensitivity", 1), ("Medium sensitivity", 2), ("Low sensitivity", 3)], missing = 2);
 
+// Gaming
+reg_switch!(game_mode, set_game_mode, "Software\\Microsoft\\GameBar", "AutoGameModeEnabled", on = 1, off = 0, missing = true);
+reg_switch!(game_bar, set_game_bar, "Software\\Microsoft\\GameBar", "UseNexusForGameBarEnabled", on = 1, off = 0, missing = true);
+reg_switch!(game_dvr, set_game_dvr, "System\\GameConfigStore", "GameDVR_Enabled", on = 1, off = 0, missing = true);
+
+// Typing
+const TIP: &str = "Software\\Microsoft\\TabletTip\\1.7";
+reg_switch!(hw_suggest, set_hw_suggest, "Software\\Microsoft\\Input\\Settings", "EnableHwkbTextPrediction", on = 1, off = 0, missing = false);
+reg_switch!(multilingual, set_multilingual, "Software\\Microsoft\\Input\\Settings", "MultilingualEnabled", on = 1, off = 0, missing = false);
+reg_switch!(autocorrect, set_autocorrect, TIP, "EnableAutocorrection", on = 1, off = 0, missing = true);
+reg_switch!(spellcheck, set_spellcheck, TIP, "EnableSpellchecking", on = 1, off = 0, missing = true);
+
+// Language & region
+fn intl(name: &str) -> String {
+    reg_str(HKEY_CURRENT_USER, w!("Control Panel\\International"), PCWSTR(HSTRING::from(name).as_ptr()))
+}
+/// A locale's name in its own words, e.g. "en-US" -> "English (United States)".
+fn locale_display(tag: &str) -> String {
+    use windows::Win32::Globalization::{GetLocaleInfoEx, LOCALE_SLOCALIZEDDISPLAYNAME};
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetLocaleInfoEx(&HSTRING::from(tag), LOCALE_SLOCALIZEDDISPLAYNAME, Some(&mut buf)) };
+    if n > 1 { String::from_utf16_lossy(&buf[..n as usize - 1]) } else { tag.to_string() }
+}
+fn display_language() -> String {
+    use windows::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
+    let mut buf = [0u16; 85];
+    let n = unsafe { LCIDToLocaleName(GetUserDefaultUILanguage() as u32, Some(&mut buf), 0) };
+    locale_display(&String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]))
+}
+fn regional_format() -> String {
+    locale_display(&intl("LocaleName"))
+}
+fn country() -> String {
+    use windows::Win32::Globalization::{GetGeoInfoEx, GetUserDefaultGeoName, GEO_FRIENDLYNAME};
+    let mut code = [0u16; 16];
+    let n = unsafe { GetUserDefaultGeoName(&mut code) };
+    let code = String::from_utf16_lossy(&code[..(n.max(1) - 1) as usize]);
+    let mut name = [0u16; 128];
+    let m = unsafe { GetGeoInfoEx(&HSTRING::from(code.as_str()), GEO_FRIENDLYNAME, Some(&mut name)) };
+    if m > 1 { String::from_utf16_lossy(&name[..m as usize - 1]) } else { code }
+}
+/// Today written the way the regional format writes dates and times.
+fn format_sample() -> String {
+    format!("Short date {}  |  Time {}", intl("sShortDate"), intl("sTimeFormat"))
+}
+pub fn first_day(v: &str) -> String {
+    // Windows counts from Monday (0) to Sunday (6)
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].get(v.trim().parse::<usize>().unwrap_or(6)).unwrap_or(&"Sunday").to_string()
+}
+fn week_start() -> String {
+    first_day(&intl("iFirstDayOfWeek"))
+}
+
+// Accounts
+fn user_name() -> String {
+    std::env::var("USERNAME").unwrap_or_default()
+}
+fn pc_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+reg_switch!(dynamic_lock, set_dynamic_lock, "Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "EnableGoodbye", on = 1, off = 0, missing = false);
+reg_switch!(lock_privacy, set_lock_privacy, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "DisableAutomaticRestartSignOn", on = 0, off = 1, missing = true);
+
 // Storage
 reg_switch!(storage_sense, set_storage_sense, "Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy", "01", on = 1, off = 0, missing = false);
 
@@ -1565,6 +1628,44 @@ fn pages() -> Vec<Page> {
             r(0xEF1F, "Transparency effects", "Windows and surfaces appear translucent", Toggle(transparency, set_transparency)),
             r(0xE790, "Accent color", "", Link("ms-settings:colors")),
         ]),
+        sub("Game Mode", "Gaming", vec![
+            r(0xE7FC, "Game Mode", "Turns off things in the background, like Windows updates and app notifications", Toggle(game_mode, set_game_mode)),
+            r(0xE7F4, "Graphics", "Choose which graphics card each app uses, in Windows' own page", Link("ms-settings:display-advancedgraphics")),
+        ]),
+        sub("Game Bar", "Gaming", vec![
+            r(SET | 0xF192, "Allow your controller to open Game Bar", "Press the Xbox button, or Windows logo key + G", Toggle(game_bar, set_game_bar)),
+            r(0xE714, "Record what happened", "Captures in the background while you play", Toggle(game_dvr, set_game_dvr)),
+        ]),
+        sub("Typing", "Time & language", vec![
+            r(0xE144, "Show text suggestions when typing on the physical keyboard", "", Toggle(hw_suggest, set_hw_suggest)),
+            r(0xE144, "Multilingual text suggestions", "", Toggle(multilingual, set_multilingual)),
+            r(0xE144, "Autocorrect misspelled words", "", Toggle(autocorrect, set_autocorrect)),
+            r(0xE144, "Highlight misspelled words", "", Toggle(spellcheck, set_spellcheck)),
+            r(0xE765, "Touch keyboard and advanced keyboard settings", "In Windows' own page", Link("ms-settings:typing")),
+        ]),
+        sub("Language & region", "Time & language", vec![
+            r(0, "Language", "", Header),
+            r(0xF2B7, "Windows display language", "Windows features like Settings and File Explorer appear in this language", Info(display_language)),
+            r(0xF2B7, "Add or change preferred languages", "In Windows' own page", Link("ms-settings:regionlanguage")),
+            r(0, "Region", "", Header),
+            r(0xE909, "Country or region", "Windows and apps might use your country or region to give you local content", Info(country)),
+            r(0xE8EF, "Regional format", "Windows and some apps format dates and times based on your regional format", Info(regional_format)),
+            r(0xE787, "Formats", "", Info(format_sample)),
+            r(0xE787, "First day of week", "", Info(week_start)),
+        ]),
+        sub("Your info", "Accounts", vec![
+            r(0xE77B, "User name", "", Info(user_name)),
+            r(0xE715, "Microsoft account", "", Info(account_email)),
+            r(0xE7EF, "Account type", "", Info(account_type)),
+            r(0xE7F4, "Device name", "", Info(pc_name)),
+            r(0xE722, "Adjust your photo, manage your account online", "In Windows' own page", Link("ms-settings:yourinfo")),
+        ]),
+        sub("Sign-in options", "Accounts", vec![
+            r(0xE192, "Ways to sign in: face, fingerprint, PIN, security key, password", "Changing them needs Windows' own page, which asks you to confirm who you are", Link("ms-settings:signinoptions")),
+            r(0, "Additional settings", "", Header),
+            r(0xE72E, "Dynamic lock", "Automatically lock your device when you're away, using a paired phone", Toggle(dynamic_lock, set_dynamic_lock)),
+            r(0xE72E, "Use my sign-in info to automatically finish setting up after an update", "", Toggle(lock_privacy, set_lock_privacy)),
+        ]),
         sub("Devices", "Bluetooth & devices", vec![
             r(0, "Bluetooth devices", "", Header),
             r(0, "", "", Actions(bt_list, "Manage", bt_manage)),
@@ -1693,8 +1794,8 @@ fn pages() -> Vec<Page> {
         top("Accounts", 0xE77B, vec![
             r(0, "", "", AccountHero(account_summary)),
             r(0, "Account settings", "", Header),
-            r(0xE77B, "Your info", "Profile photo", Link("ms-settings:yourinfo")),
-            r(0xE192, "Sign-in options", "Windows Hello, security key, password, dynamic lock", Link("ms-settings:signinoptions")),
+            r(0xE77B, "Your info", "Profile photo", Sub("Your info")),
+            r(0xE192, "Sign-in options", "Windows Hello, security key, password, dynamic lock", Sub("Sign-in options")),
             r(0xE715, "Email & accounts", "Accounts used by email, calendar, and contacts", Link("ms-settings:emailandaccounts")),
             r(0xE716, "Family", "Manage your family group, edit account types and device permissions", Link("ms-settings:family-group")),
             r(0xE753, "Windows backup", "Back up your files, apps, preferences to restore them across devices", Link("ms-settings:backup")),
@@ -1705,15 +1806,15 @@ fn pages() -> Vec<Page> {
         top("Time & language", 0xE775, vec![
             r(0, "", "", TimeHero(time_summary)),
             r(SET | 0xE4AB, "Date & time", "Time zones, automatic clock settings, calendar display", Sub("Date & time")),
-            r(0xF2B7, "Language & region", "Windows display language, preferred languages, regional formats", Link("ms-settings:regionlanguage")),
-            r(0xE144, "Typing", "Touch keyboard, text suggestions, preferences", Link("ms-settings:typing")),
+            r(0xF2B7, "Language & region", "Windows display language, preferred languages, regional formats", Sub("Language & region")),
+            r(0xE144, "Typing", "Touch keyboard, text suggestions, preferences", Sub("Typing")),
             r(0xEFA9, "Speech", "Speech language, speech recognition microphone setup, voices", Link("ms-settings:speech")),
         ]),
         top("Gaming", 0xE7FC, vec![
             r(SET | 0xF28C, "XBOX mode", "Enable, accessibility control hints", Link("ms-settings:gaming-fullscreenexperience")),
-            r(SET | 0xF192, "Game Bar", "Controller and keyboard shortcuts", Link("ms-settings:gaming-gamebar")),
+            r(SET | 0xF192, "Game Bar", "Controller and keyboard shortcuts", Sub("Game Bar")),
             r(0xF7EE, "Captures", "Save location, recording preferences", Link("ms-settings:gaming-gamedvr")),
-            r(0xE7FC, "Game Mode", "Optimize your PC for play", Link("ms-settings:gaming-gamemode")),
+            r(0xE7FC, "Game Mode", "Optimize your PC for play", Sub("Game Mode")),
         ]),
         top("Accessibility", 0xE776, vec![
             r(0, "Vision", "", Header),
@@ -3068,6 +3169,13 @@ pub unsafe fn snapshot(path: &str, page: &str) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn week_start_names() {
+        assert_eq!(first_day("0"), "Monday");
+        assert_eq!(first_day("6"), "Sunday");
+        assert_eq!(first_day("x"), "Sunday");
+    }
 
     #[test]
     fn default_printer_value() {
