@@ -912,6 +912,65 @@ pub(crate) unsafe fn open_rust(target: &str) -> bool {
     PostMessageW(Some(f), WM_HOTKEY, WPARAM(id as usize), LPARAM(0)).is_ok()
 }
 
+/// Start a program, file or link and make sure what it opens comes to the FRONT.
+/// Windows only lets the process the user last interacted with put a window in front; a desktop
+/// program started from the shell otherwise opened behind everything ("nothing happened").
+/// So: allow any process to take the foreground, start it, then once its first window shows,
+/// bring that window forward ourselves.
+pub(crate) fn start_front(target: &str, args: &str, verb: &str) {
+    let (target, args, verb) = (target.to_string(), args.to_string(), verb.to_string());
+    std::thread::spawn(move || unsafe {
+        use windows::Win32::System::Threading::{GetProcessId, WaitForInputIdle, INFINITE};
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        let (t, a, v) = (HSTRING::from(target.as_str()), HSTRING::from(args.as_str()), HSTRING::from(verb.as_str()));
+        let mut sei = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI,
+            lpVerb: if verb.is_empty() { PCWSTR::null() } else { PCWSTR(v.as_ptr()) },
+            lpFile: PCWSTR(t.as_ptr()),
+            lpParameters: if args.is_empty() { PCWSTR::null() } else { PCWSTR(a.as_ptr()) },
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        if ShellExecuteExW(&mut sei).is_err() || sei.hProcess.is_invalid() {
+            return; // opened by an already running app (Store apps, folders, links): it brings itself forward
+        }
+        let pid = GetProcessId(sei.hProcess);
+        let _ = AllowSetForegroundWindow(pid);
+        let _ = WaitForInputIdle(sei.hProcess, 5000);
+        let _ = INFINITE;
+        // its first visible top-level window, looked for for up to 5 seconds
+        for _ in 0..50 {
+            if let Some(w) = window_of(pid) {
+                if GetForegroundWindow() != w {
+                    crate::flyout::force_foreground(w);
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = CloseHandle(sei.hProcess);
+    });
+}
+
+/// A visible, titled, top-level window belonging to process `pid`.
+unsafe fn window_of(pid: u32) -> Option<HWND> {
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let want = &mut *(lp.0 as *mut (u32, Option<HWND>));
+        let mut p = 0;
+        GetWindowThreadProcessId(h, Some(&mut p));
+        if p == want.0 && IsWindowVisible(h).as_bool() && GetWindowTextLengthW(h) > 0 && GetWindow(h, GW_OWNER).map_or(true, |o| o.is_invalid()) {
+            want.1 = Some(h);
+            return FALSE;
+        }
+        TRUE
+    }
+    let mut want: (u32, Option<HWND>) = (pid, None);
+    let _ = EnumWindows(Some(each), LPARAM(&mut want as *mut _ as isize));
+    want.1
+}
+
 unsafe fn launch(hwnd: HWND, i: usize, verb: PCWSTR) {
     let target = ST.with(|s| {
         let mut st = s.borrow_mut();
@@ -922,11 +981,14 @@ unsafe fn launch(hwnd: HWND, i: usize, verb: PCWSTR) {
         save_counts(&st.counts);
         Some(t)
     });
-    hide(hwnd);
+    // hide without handing the focus back to the app that had it before: what we start gets it
+    let _ = ShowWindow(hwnd, SW_HIDE);
+    let _ = ShowWindow(pill(), SW_HIDE);
     if let Some(t) = target {
         // "Run as administrator" always goes to Windows' own app
-        if verb.to_string().is_ok_and(|v| v == "runas") || !open_rust(&t) {
-            ShellExecuteW(None, verb, &HSTRING::from(t), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        let verb = verb.to_string().unwrap_or_default();
+        if verb == "runas" || !open_rust(&t) {
+            start_front(&t, "", &verb);
         }
     }
 }

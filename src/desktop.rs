@@ -262,7 +262,7 @@ unsafe fn open(it: &Item) {
         return;
     }
     let (file, args) = if it.parse.starts_with("::") { (String::from("explorer.exe"), format!("shell:{}", it.parse)) } else { (it.parse.clone(), String::new()) };
-    ShellExecuteW(None, w!("open"), &HSTRING::from(file), &HSTRING::from(args), PCWSTR::null(), SW_SHOWNORMAL);
+    crate::launcher::start_front(&file, &args, "open");
 }
 
 /// Windows' own context menu for the selected items, or for the desktop background when none.

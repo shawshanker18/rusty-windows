@@ -616,7 +616,7 @@ unsafe fn activate(st: &State, i: usize) {
     let Some(a) = st.apps.get(i) else { return };
     let Some(&h) = a.windows.first() else {
         // pinned, not running: start it
-        windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(a.icon.as_str()), None, None, SW_SHOWNORMAL);
+        crate::launcher::start_front(&a.icon, "", "open");
         return;
     };
     if st.active.as_deref() == Some(a.key.as_str()) && !IsIconic(h).as_bool() {
@@ -769,7 +769,7 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                             }
                         }
                         2 => {
-                            windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(launch.as_str()), None, None, SW_SHOWNORMAL);
+                            crate::launcher::start_front(&launch, "", "open");
                         }
                         3 => {
                             let pins = toggle_pin(ST.with(|s| s.borrow().pins.clone().unwrap_or_default()), &key, &launch);
@@ -781,7 +781,7 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                         }
                         n if n >= 100 => {
                             if let Some((_, path)) = recent.get(n as usize - 100) {
-                                windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(path.as_str()), None, None, SW_SHOWNORMAL);
+                                crate::launcher::start_front(&path, "", "open");
                             }
                         }
                         _ => {}
