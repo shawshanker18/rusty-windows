@@ -435,11 +435,12 @@ unsafe fn draw(st: &mut State, mem: HDC, rc: &RECT, dpi: f32) -> windows::core::
         rt.FillRoundedRectangle(&rrect(rect(x0 + 2.0, 4.0, x0 + START_W - 2.0, 44.0), 4.0), &brush(C_HOVER)?);
     }
     let stops = [
-        D2D1_GRADIENT_STOP { position: 0.0, color: rgb(0x6CD1FF) },
-        D2D1_GRADIENT_STOP { position: 1.0, color: rgb(0x0B86DF) },
+        // measured on the real logo: #69E8FF a fifth of the way in, #22B0FF four fifths in
+        D2D1_GRADIENT_STOP { position: 0.0, color: rgb(0x81FBFF) },
+        D2D1_GRADIENT_STOP { position: 1.0, color: rgb(0x0A9DFF) },
     ];
     let coll = rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
-    let (lx, ly) = (x0 + 11.0, 12.0);
+    let (lx, ly) = (x0 + 11.0, 13.0);
     let grad = rt.CreateLinearGradientBrush(
         &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
             startPoint: windows_numerics::Vector2 { X: lx, Y: ly },
@@ -507,7 +508,7 @@ unsafe fn draw(st: &mut State, mem: HDC, rc: &RECT, dpi: f32) -> windows::core::
             rt.FillRoundedRectangle(&rrect(grp, 4.0), &brush(C_HOVER)?);
         }
     }
-    icon(0xE70E, get(Tray::Chevron), &white);
+    icon(0xE971, get(Tray::Chevron), &white); // the heavier chevron, as on the real taskbar
     let bp = D2D1_BITMAP_PROPERTIES {
         pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
         dpiX: 96.0,
@@ -539,18 +540,18 @@ unsafe fn draw(st: &mut State, mem: HDC, rc: &RECT, dpi: f32) -> windows::core::
         rt.FillRoundedRectangle(&rrect(fill, 1.0), &brush(if charging { rgb(0x8BD48A) } else { rgb(0xFFFFFF) })?);
         if charging {
             // white lightning bolt with a dark outline, centred on the battery
-            let (cx, cy) = (bx + 9.0, by + 5.5);
+            let (cx, cy) = (bx + 9.0, by + 1.5);
             let f: ID2D1Factory = rt.GetFactory()?;
             let path = f.CreatePathGeometry()?;
             let sink = path.Open()?;
-            let pts = [(1.5, -6.0), (-3.0, 0.8), (-0.2, 0.8), (-1.5, 6.0), (3.0, -0.8), (0.2, -0.8)];
+            let pts = [(1.2, -4.8), (-2.4, 0.6), (-0.2, 0.6), (-1.2, 4.8), (2.4, -0.6), (0.2, -0.6)];
             sink.BeginFigure(windows_numerics::Vector2 { X: cx + pts[0].0, Y: cy + pts[0].1 }, D2D1_FIGURE_BEGIN_FILLED);
             for p in &pts[1..] {
                 sink.AddLine(windows_numerics::Vector2 { X: cx + p.0, Y: cy + p.1 });
             }
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
-            rt.DrawGeometry(&path, &brush(rgb(0x202020))?, 1.5, None);
+            rt.DrawGeometry(&path, &brush(rgb(0x202020))?, 2.5, None);
             rt.FillGeometry(&path, &white, None);
         }
     }
