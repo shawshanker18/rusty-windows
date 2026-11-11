@@ -124,44 +124,15 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let dc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
-            let bg = CreateSolidBrush(COLORREF(0x2C2C2C));
-            FillRect(dc, &rc, bg);
-            let _ = DeleteObject(bg.into());
-            SetBkMode(dc, TRANSPARENT);
-            let font = |px: f32, weight: i32| CreateFontW(-(px * s) as i32, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI Variable Text"));
-            let (big, small) = (font(14.0, 600), font(12.0, 400));
-            let old = SelectObject(dc, big.into());
-            let pen = SelectObject(dc, GetStockObject(NULL_PEN));
-            let sel = SEL.load(Relaxed);
-            for (i, hkl) in layouts().iter().enumerate() {
-                let y = PAD + i as f32 * ROW;
-                if i == sel {
-                    // colours are 0x00BBGGRR
-                    let brush = CreateSolidBrush(COLORREF(0x3D3D3D));
-                    let ob = SelectObject(dc, brush.into());
-                    let _ = RoundRect(dc, (PAD * s) as i32, ((y + 2.0) * s) as i32, rc.right - (PAD * s) as i32, ((y + ROW - 2.0) * s) as i32, (8.0 * s) as i32, (8.0 * s) as i32);
-                    SelectObject(dc, ob);
-                    let _ = DeleteObject(brush.into());
-                    let accent = CreateSolidBrush(COLORREF(0xFFC24C));
-                    FillRect(dc, &RECT { left: (PAD * s) as i32, top: ((y + 18.0) * s) as i32, right: ((PAD + 3.0) * s) as i32, bottom: ((y + ROW - 18.0) * s) as i32 }, accent);
-                    let _ = DeleteObject(accent.into());
-                }
-                let (language, layout) = names(*hkl);
-                SelectObject(dc, big.into());
-                SetTextColor(dc, COLORREF(0xFFFFFF));
-                let mut r = RECT { left: ((PAD + 16.0) * s) as i32, top: ((y + 9.0) * s) as i32, right: rc.right - (PAD * s) as i32, bottom: ((y + 29.0) * s) as i32 };
-                let mut t: Vec<u16> = language.encode_utf16().collect();
-                DrawTextW(dc, &mut t, &mut r, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-                SelectObject(dc, small.into());
-                SetTextColor(dc, COLORREF(0xC5C5C5));
-                let mut r = RECT { left: ((PAD + 16.0) * s) as i32, top: ((y + 29.0) * s) as i32, right: rc.right - (PAD * s) as i32, bottom: ((y + 48.0) * s) as i32 };
-                let mut t: Vec<u16> = if layout.is_empty() { "Keyboard".encode_utf16().collect() } else { format!("{layout} keyboard").encode_utf16().collect() };
-                DrawTextW(dc, &mut t, &mut r, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            // Direct2D into a buffer that keeps alpha: Windows' blurred panel material shows through
+            use windows::Win32::UI::Controls::{BeginBufferedPaint, EndBufferedPaint, BPBF_TOPDOWNDIB, BPPF_ERASE, BP_PAINTPARAMS};
+            let params = BP_PAINTPARAMS { cbSize: size_of::<BP_PAINTPARAMS>() as u32, dwFlags: BPPF_ERASE, ..Default::default() };
+            let mut mem = HDC::default();
+            let pb = BeginBufferedPaint(dc, &rc, BPBF_TOPDOWNDIB, Some(&params), &mut mem);
+            if !mem.is_invalid() {
+                let _ = draw(mem, &rc, s);
+                let _ = EndBufferedPaint(pb, true);
             }
-            SelectObject(dc, pen);
-            SelectObject(dc, old);
-            let _ = DeleteObject(big.into());
-            let _ = DeleteObject(small.into());
             let _ = EndPaint(hwnd, &ps);
         }
         WM_LBUTTONUP => {
@@ -198,6 +169,41 @@ pub unsafe fn report() -> String {
     list.iter().map(|h| { let (a, b) = names(*h); format!("{:08X} {a} / {b}{}", *h as usize & 0xFFFF_FFFF, if *h == current { " (current)" } else { "" }) }).collect::<Vec<_>>().join("\n")
 }
 
+/// The list: one row per keyboard layout, the chosen one highlighted with an accent bar.
+unsafe fn draw(dc: HDC, rc: &RECT, s: f32) -> windows::core::Result<()> {
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use crate::flyout::{rect, rrect, utf16};
+    use crate::quick::rgb;
+    let f: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+    let props = D2D1_RENDER_TARGET_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, ..Default::default() };
+    let rt = f.CreateDCRenderTarget(&props)?;
+    rt.BindDC(dc, rc)?;
+    rt.SetDpi(96.0 * s, 96.0 * s);
+    let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+    let font = |px: f32, weight: DWRITE_FONT_WEIGHT| dw.CreateTextFormat(w!("Segoe UI Variable Text"), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, w!(""));
+    let (big, small) = (font(14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?, font(12.0, DWRITE_FONT_WEIGHT_NORMAL)?);
+    let w = rc.right as f32 / s;
+    let b = |c: u32| rt.CreateSolidColorBrush(&rgb(c), None);
+    rt.BeginDraw();
+    rt.Clear(Some(&crate::flyout::base(rgb(0x2C2C2C))));
+    let sel = SEL.load(Relaxed);
+    for (i, hkl) in layouts().iter().enumerate() {
+        let y = PAD + i as f32 * ROW;
+        if i == sel {
+            rt.FillRoundedRectangle(&rrect(rect(PAD, y + 2.0, w - PAD, y + ROW - 2.0), 4.0), &b(0x3D3D3D)?);
+            rt.FillRoundedRectangle(&rrect(rect(PAD, y + 18.0, PAD + 3.0, y + ROW - 18.0), 1.5), &b(0x4CC2FF)?);
+        }
+        let (language, layout) = names(*hkl);
+        let layout = if layout.is_empty() { "Keyboard".to_string() } else { format!("{layout} keyboard") };
+        rt.DrawText(&utf16(&language), &big, &rect(PAD + 16.0, y + 9.0, w - PAD, y + 29.0), &b(0xFFFFFF)?, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        rt.DrawText(&utf16(&layout), &small, &rect(PAD + 16.0, y + 29.0, w - PAD, y + 48.0), &b(0xC5C5C5)?, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    }
+    rt.EndDraw(None, None)
+}
+
 pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst, lpszClassName: w!("shellbits_lang"), ..Default::default() };
     RegisterClassW(&wc);
@@ -205,6 +211,7 @@ pub unsafe fn create(inst: HINSTANCE) -> windows::core::Result<()> {
     let (dark, round) = (1u32, 2u32);
     let _ = DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
     let _ = DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const c_void, 4);
+    let _ = crate::fluent_window(h); // Windows' blurred panel material
     LANG.store(h.0 as isize, Relaxed);
     Ok(())
 }
