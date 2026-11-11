@@ -66,7 +66,8 @@ system. Levels 3 and 4 are long-term and may only ever run on machines whose own
 | Calculator: Programmer, Date, Graphing, converters | Planned | 1 |
 | Notepad | Partial (no tabs, no spell check) | 1 |
 | Task Manager | Planned | 2 |
-| Snipping Tool and screen recording | Planned | 2 |
+| Snipping Tool: rectangle snip to clipboard and PNG | Done | 1 |
+| Snipping Tool: window and freeform modes, editor, screen recording | Planned | 2 |
 | Photos viewer and editor | Planned | 2 |
 | Media Player, Movies & TV | Planned | 2 |
 | Paint | Planned | 2 |

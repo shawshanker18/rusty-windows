@@ -835,11 +835,17 @@ pub unsafe fn toggle(nc: HWND) {
         hide();
         return;
     }
+    let t0 = std::time::Instant::now();
     ST.with(|s| { let mut st = s.borrow_mut(); st.scroll = 0.0; st.month_off = 0; refresh_local(&mut st); });
+    let t1 = t0.elapsed().as_millis();
     place();
+    let t2 = t0.elapsed().as_millis();
     SHOWN_AT.with(|t| t.set(Some(std::time::Instant::now())));
     crate::flyout::force_foreground(nc);
     fetch_async();
+    // how long opening took on the UI thread (it also serves the taskbar): keep an eye on it
+    let _ = std::fs::write(std::env::temp_dir().join("shellbits-nc-open.txt"), format!("state {t1} ms, placed {t2} ms, focused {} ms
+", t0.elapsed().as_millis()));
 }
 
 unsafe fn hide() {

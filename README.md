@@ -30,8 +30,8 @@ Windows on the left, Rusty Windows on the right, captured on the same PC.
 
 <p align="center"><img src="assets/flyouts.png" alt="Windows 11 flyouts next to their Rust versions: Quick Settings, calendar, notification center, Start, snap layouts and system tray" width="85%"></p>
 
-Not yet captured side by side: Alt+Tab, Task View, Win+X, Run, clipboard history, the emoji panel
-and the volume and media flyouts.
+Not yet captured side by side: Alt+Tab, Task View, snap layouts, Win+X, Run, clipboard history,
+the emoji panel and the volume and media flyouts.
 
 ## What is in it
 
@@ -89,7 +89,8 @@ difficulty for every line are in [GOALS.md](docs/GOALS.md).
 - [ ] Settings sub-pages (partial), Control Panel
 - [ ] File Explorer (partial: tabs, preview, commands), Open and Save dialogs
 - [ ] Notepad (partial: no tabs or spell check)
-- [ ] Task Manager, Snipping Tool, Photos, Media Player, Paint, Terminal
+- [ ] Screen snip (partial: Win+Shift+S rectangle to clipboard and PNG; no editor or other modes)
+- [ ] Task Manager, Photos, Media Player, Paint, Terminal
 - [ ] Clock, Sound Recorder, Camera, Sticky Notes, Magnifier, On-Screen Keyboard
 - [ ] Registry Editor, Event Viewer, Services, Device Manager, Disk Management, Task Scheduler
 - [ ] Resource Monitor, Remote Desktop, Store, Windows Security dashboard, Game Bar

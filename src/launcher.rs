@@ -1990,7 +1990,7 @@ pub unsafe fn on_key(k: &KBDLLHOOKSTRUCT, up: bool) -> bool {
 }
 
 /// Close any open panel the click landed outside of (a panel and its companion count as one).
-unsafe fn dismiss_outside(pt: POINT) {
+pub(crate) unsafe fn dismiss_outside(pt: POINT) {
     let h = |a: &AtomicIsize| HWND(a.load(Relaxed) as *mut c_void);
     let groups = [
         [h(&LAUNCHER), h(&PILL)],
@@ -2010,6 +2010,13 @@ unsafe fn dismiss_outside(pt: POINT) {
         r[2] > r[0] && (r[0]..r[2]).contains(&pt.x) && (r[1]..r[3]).contains(&pt.y)
     });
     if on_zone {
+        return;
+    }
+    // the same goes for our own taskbar (shell mode): its click handler opens AND closes the panel.
+    // Closing here on the press made the release open it again, so a second click never closed it.
+    let bar = HWND(crate::taskbar::TASKBAR.load(Relaxed) as *mut c_void);
+    let mut br = RECT::default();
+    if IsWindowVisible(bar).as_bool() && GetWindowRect(bar, &mut br).is_ok() && PtInRect(&br, pt).as_bool() {
         return;
     }
     for g in groups {

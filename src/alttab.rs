@@ -36,7 +36,7 @@ const T_SHOW: usize = 1;
 const SHOW_DELAY_MS: u32 = 150; // quicker Alt+Tab = switch without flashing the UI, like Windows
 
 // layout, DIPs
-const TW: f32 = 260.0; // thumbnail box
+const TW: f32 = 338.0; // thumbnail box: wide enough for a 16:9 window at full height, so cards share one height like Windows
 const TH: f32 = 190.0;
 const HEAD: f32 = 32.0; // icon + title row
 const IN: f32 = 8.0; // card inner padding
@@ -153,7 +153,15 @@ pub(crate) unsafe fn frame(h: HWND) -> (f32, Option<RECT>) {
     if IsIconic(h).as_bool() {
         let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
         let _ = GetWindowPlacement(h, &mut wp);
-        let r = wp.rcNormalPosition;
+        let mut r = wp.rcNormalPosition;
+        // minimised from maximised (WPF_RESTORETOMAXIMIZED): it comes back filling the work area, and
+        // its picture has that shape - the small "restored" rectangle gave a squeezed card
+        if wp.flags.0 & 2 != 0 {
+            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+                r = mi.rcWork;
+            }
+        }
         return (((r.right - r.left) as f32 / (r.bottom - r.top).max(1) as f32), None);
     }
     let (mut wr, mut fb) = (RECT::default(), RECT::default());

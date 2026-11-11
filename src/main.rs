@@ -16,6 +16,7 @@ mod notepad;
 mod notify;
 mod peek;
 mod snap;
+mod snip;
 mod clip;
 mod emoji;
 mod lang;
@@ -132,6 +133,9 @@ fn main() -> windows::core::Result<()> {
         if args.get(1).map(String::as_str) == Some("--snapshot-qs") {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             return quick::snapshot(args.get(2).map(String::as_str).unwrap_or("qs.bmp"), args.get(3).map(String::as_str).unwrap_or(""));
+        }
+        if args.get(1).map(String::as_str) == Some("--snip") {
+            return snip::run_now();
         }
         if args.get(1).map(String::as_str) == Some("--snapshot-calc") {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

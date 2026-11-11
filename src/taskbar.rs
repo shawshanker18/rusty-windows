@@ -696,7 +696,8 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     let _ = GetCursorPos(&mut pt);
                     crate::tray::click(i, 0, pt.x, pt.y);
                 }
-                None => {}
+                // an empty part of the bar: close whatever panel is open, like a click anywhere else
+                None => crate::launcher::dismiss_outside(POINT { x: -32000, y: -32000 }),
             }
         }
         WM_LBUTTONDBLCLK => {

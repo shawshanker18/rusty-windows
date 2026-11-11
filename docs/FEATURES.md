@@ -21,6 +21,7 @@ real Windows window at the same size. The project target is 99.99%. "Not measure
 | Emoji panel | `emoji.rs` | search, insert | not measured |
 | Language switcher | `lang.rs` | list, click to switch | not measured |
 | Desktop | `desktop.rs`, `wallpaper.rs`, `peek.rs` | icons, video wallpaper (picks a copy scaled to your screen), show desktop, peek | not measured |
+| Screen snip | `snip.rs` | Win+Shift+S in shell mode (or `--snip`): drag a rectangle, copied to the clipboard and saved to Pictures\Screenshots | n/a |
 | Shell mode | `session.rs`, `main.rs` | runs instead of Explorer, starts your sign-in apps, crash watchdog (restart in 4 to 8 s, at most 3 a minute), Ctrl+Alt+Shift+E back to Explorer | n/a |
 
 ## Apps
