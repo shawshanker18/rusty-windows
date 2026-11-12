@@ -201,78 +201,44 @@ pub enum Pane {
 }
 const PANE_W: f32 = 520.0;
 
-/// Terminal pane: what has been run and printed, and the folder commands run in.
-static TERM: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Terminal pane: a real cmd.exe on a pseudo console (crate::term), started in the session folder
+/// the first time the pane is used, and the folder it was started in.
+static CONSOLE: Mutex<Option<crate::term::Console>> = Mutex::new(None);
 static TERM_DIR: Mutex<String> = Mutex::new(String::new());
 static TEDIT: AtomicIsize = AtomicIsize::new(0);
 /// Preview pane: local servers that are listening, as (port, program).
 static SERVERS: Mutex<Vec<(u16, String)>> = Mutex::new(Vec::new());
 
-/// `cd <dir>` resolved against the current folder, or None when the command is something else.
-pub fn cd_target(cur: &str, cmd: &str) -> Option<String> {
-    let rest = cmd.trim().strip_prefix("cd")?;
-    if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\\') || rest.starts_with('.')) {
-        return None; // e.g. "cdk"
+/// Send keys to the console, starting it first if it is not running.
+fn term_send(keys: &str) {
+    let mut c = CONSOLE.lock().unwrap();
+    if !c.as_ref().is_some_and(|c| c.alive()) {
+        let dir = TERM_DIR.lock().unwrap().clone();
+        // as wide as the pane holds at 13 px Cascadia Mono (~7.9 px a character)
+        // ponytail: set once at start; ResizePseudoConsole on window resize if it matters
+        *c = crate::term::start(&dir, ((PANE_W - 28.0) / 7.9) as usize, 30, notify).ok();
     }
-    let arg = rest.trim().trim_start_matches("/d ").trim().trim_matches('"');
-    if arg.is_empty() {
-        return Some(cur.to_string());
+    if let Some(c) = c.as_ref() {
+        c.write(keys);
     }
-    let p = std::path::Path::new(cur).join(arg);
-    Some(std::fs::canonicalize(&p).map(|c| c.display().to_string().trim_start_matches(r"\\?\").to_string()).unwrap_or_else(|_| p.display().to_string()))
 }
 
-/// Run one command line in the Terminal pane's folder (cmd.exe, like Windows Terminal's default
-/// prompt) and append its output. ponytail: no TTY - interactive programs that wait for input
-/// will not get any; a real console host (ConPTY) when that matters.
-fn term_run(cmd: String) {
-    let dir = TERM_DIR.lock().unwrap().clone();
-    let short = dir.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or(&dir).to_string();
-    TERM.lock().unwrap().push(format!("{short}> {cmd}"));
-    notify();
-    if let Some(d) = cd_target(&dir, &cmd) {
-        if std::path::Path::new(&d).is_dir() {
-            *TERM_DIR.lock().unwrap() = d;
-        } else {
-            TERM.lock().unwrap().push("The system cannot find the path specified.".into());
-        }
-        notify();
-        return;
-    }
-    if cmd.trim() == "cls" || cmd.trim() == "clear" {
-        TERM.lock().unwrap().clear();
-        notify();
-        return;
-    }
-    std::thread::spawn(move || {
-        use std::os::windows::process::CommandExt;
-        let out = std::process::Command::new("cmd.exe").arg("/d").arg("/s").arg("/c").raw_arg(format!("\"{cmd}\"")).current_dir(&dir).creation_flags(0x0800_0000).output();
-        let mut t = TERM.lock().unwrap();
-        match out {
-            Ok(o) => {
-                for l in String::from_utf8_lossy(&o.stdout).lines().chain(String::from_utf8_lossy(&o.stderr).lines()) {
-                    t.push(l.replace('\t', "    "));
-                }
-            }
-            Err(e) => t.push(e.to_string()),
-        }
-        let n = t.len();
-        if n > 5000 {
-            t.drain(..n - 5000);
-        }
-        drop(t);
-        notify();
-    });
+fn term_lines() -> Vec<String> {
+    CONSOLE.lock().unwrap().as_ref().map(|c| c.screen.lock().unwrap().lines()).unwrap_or_default()
 }
 
 unsafe extern "system" fn term_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_KEYDOWN && wp.0 == VK_RETURN.0 as usize {
         let cmd = edit_text(hwnd);
         let _ = SetWindowTextW(hwnd, w!(""));
-        if !cmd.trim().is_empty() {
+        {
             UI.with(|u| if let Ok(mut u) = u.try_borrow_mut() { u.pane_scroll = f32::MAX; });
-            term_run(cmd);
         }
+        term_send(&format!("{cmd}\r")); // an empty line too, like pressing Enter in a console
+        return LRESULT(0);
+    }
+    if msg == WM_KEYDOWN && wp.0 == 'C' as usize && GetKeyState(VK_CONTROL.0 as i32) < 0 && SendMessageW(hwnd, EM_GETSEL, None, None).0 & 0xFFFF == (SendMessageW(hwnd, EM_GETSEL, None, None).0 >> 16) & 0xFFFF {
+        term_send("\x03"); // Ctrl+C with nothing selected stops the running program
         return LRESULT(0);
     }
     if msg == WM_CHAR && wp.0 == 13 {
@@ -1834,7 +1800,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
             }
             Pane::Terminal => {
                 // output above, the command box (a child edit) in the last 40 px
-                let lines = TERM.lock().unwrap().clone();
+                let lines = term_lines();
                 let view = bot - top - 44.0;
                 ui.pane_scroll = ui.pane_scroll.clamp(0.0, (lines.len() as f32 * 18.0 - view).max(0.0));
                 let first = (ui.pane_scroll / 18.0) as usize;
@@ -2760,11 +2726,10 @@ unsafe fn click(hwnd: HWND, act: Act) {
                         u.pane.is_some()
                     });
                     if open && k == 0 {
-                        let mut d = TERM_DIR.lock().unwrap();
-                        if d.is_empty() || TERM.lock().unwrap().is_empty() {
-                            *d = folder.clone();
+                        if CONSOLE.lock().unwrap().is_none() {
+                            *TERM_DIR.lock().unwrap() = folder.clone();
+                            term_send(""); // start it so the prompt shows
                         }
-                        drop(d);
                         place_edit(hwnd);
                         let _ = SetFocus(Some(HWND(TEDIT.load(Relaxed) as *mut c_void)));
                     } else {
@@ -3066,9 +3031,12 @@ pub unsafe fn snapshot(path: &str) -> windows::core::Result<()> {
             }),
             "terminal" => {
                 *TERM_DIR.lock().unwrap() = first.cwd.clone();
-                term_run("echo hello from the terminal pane".into());
-                term_run("cd ..".into());
+                term_send("echo hello from the terminal pane\r");
+                term_send("set /p NAME=Your name? \r");
                 std::thread::sleep(std::time::Duration::from_millis(800));
+                term_send("Rusty\r");
+                term_send("echo hi %NAME%\r");
+                std::thread::sleep(std::time::Duration::from_millis(1200));
                 UI.with(|u| { let u = &mut *u.borrow_mut(); u.pane = Some(Pane::Terminal); u.pane_scroll = f32::MAX; });
             }
             "preview" => {
@@ -3147,12 +3115,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_cd_and_listening_ports() {
-        let tmp = std::env::temp_dir().display().to_string();
-        assert!(super::cd_target(&tmp, "dir").is_none());
-        assert!(super::cd_target(&tmp, "cdk deploy").is_none());
-        assert_eq!(super::cd_target(&tmp, "cd").unwrap(), tmp);
-        assert!(super::cd_target(&tmp, "cd ..").unwrap().len() < tmp.len());
+    fn listening_ports() {
         let ns = "  TCP    0.0.0.0:135     0.0.0.0:0   LISTENING   1100\n  TCP    127.0.0.1:5173  0.0.0.0:0   LISTENING   42\n  TCP    [::]:5173       [::]:0      LISTENING   42\n  TCP    192.168.1.5:3000  0.0.0.0:0  LISTENING   7\n  TCP    127.0.0.1:8080  1.2.3.4:5  ESTABLISHED  9\n";
         assert_eq!(super::listening(ns), vec![(5173, 42)]);
     }

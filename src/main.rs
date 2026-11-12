@@ -7,6 +7,7 @@
 mod alttab;
 mod calc;
 mod claude;
+mod term;
 mod desktop;
 mod files;
 mod flyout;
