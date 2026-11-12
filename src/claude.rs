@@ -377,6 +377,46 @@ fn load_diff(folder: String) {
 }
 
 /// A token count as the app writes it: 273, 1.7k, 10k, 918.3k, 1M.
+/// The Context panel's rows: memory files and skill listings (estimated from their text, about
+/// 4 characters a token), the rest of what is in use (messages, tools, system prompt), free space.
+pub fn breakdown(used: f64, window: f64, memory: f64, skills: f64) -> Vec<(u32, &'static str, f64)> {
+    let memory = memory.min(used);
+    let skills = skills.min(used - memory);
+    vec![
+        (0xC98A5A, "Memory files", memory),
+        (0x8C6CD9, "Skills", skills),
+        (C_BLUE, "Messages and system", used - memory - skills),
+        (0x4A4A4A, "Free space", (window - used).max(0.0)),
+    ]
+}
+
+/// (memory-file tokens, skill-listing tokens) for a session folder, cached per folder.
+fn context_parts(folder: &str) -> (f64, f64) {
+    static CACHE: Mutex<Option<(String, f64, f64)>> = Mutex::new(None);
+    if let Some((f, m, k)) = CACHE.lock().unwrap().as_ref() {
+        if f == folder {
+            return (*m, *k);
+        }
+    }
+    let home = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude");
+    let len = |p: std::path::PathBuf| std::fs::metadata(p).map_or(0, |m| m.len()) as f64;
+    // CLAUDE.md in ~/.claude, the folder and each folder above it (Claude Code reads them all)
+    let mut memory = len(home.join("CLAUDE.md"));
+    let mut dir = Some(std::path::Path::new(folder));
+    while let Some(d) = dir {
+        memory += len(d.join("CLAUDE.md"));
+        dir = d.parent();
+    }
+    // each skill is listed by its name and description line
+    let skills: f64 = std::fs::read_dir(home.join("skills")).into_iter().flatten().flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("SKILL.md")).ok())
+        .map(|t| t.lines().filter(|l| l.starts_with("name:") || l.starts_with("description:")).map(|l| l.len() as f64).sum::<f64>())
+        .sum();
+    let r = (memory / 4.0, skills / 4.0);
+    *CACHE.lock().unwrap() = Some((folder.to_string(), r.0, r.1));
+    r
+}
+
 pub fn tokens(n: f64) -> String {
     let short = |v: f64, unit: &str| {
         let t = format!("{v:.1}");
@@ -1845,9 +1885,10 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         }
         let mut py = TOP + 223.0;
         if let Some((used, window)) = use_ {
-            // ponytail: only "in use" and "free" are known here; the app's finer split (messages,
-            // tools, system prompt...) needs the CLI's own context report
-            for (colour, name, n) in [(C_BLUE, "In use", used), (0x4A4A4A, "Free space", (window - used).max(0.0))] {
+            // ponytail: memory and skills are estimated from their text; tools / system prompt / MCP
+            // stay inside "Messages and system" until the CLI's own context report is read
+            let (memory, skills) = context_parts(&set.folder);
+            for (colour, name, n) in breakdown(used, window, memory, skills) {
                 rt.FillRoundedRectangle(&rrect(rect(x + 18.0, py + 7.0, x + 27.0, py + 16.0), 2.0), &b(colour)?);
                 txt(name, &g.small, rect(x + 41.0, py, cw - 130.0, py + 24.0), &soft);
                 let (t, share) = (tokens(n), format!("{:.1}%", n / window * 100.0));
@@ -3063,6 +3104,16 @@ mod tests {
         assert!(super::cd_target(&tmp, "cd ..").unwrap().len() < tmp.len());
         let ns = "  TCP    0.0.0.0:135     0.0.0.0:0   LISTENING   1100\n  TCP    127.0.0.1:5173  0.0.0.0:0   LISTENING   42\n  TCP    [::]:5173       [::]:0      LISTENING   42\n  TCP    192.168.1.5:3000  0.0.0.0:0  LISTENING   7\n  TCP    127.0.0.1:8080  1.2.3.4:5  ESTABLISHED  9\n";
         assert_eq!(super::listening(ns), vec![(5173, 42)]);
+    }
+
+    #[test]
+    fn context_rows_add_up() {
+        let rows = super::breakdown(100_000.0, 200_000.0, 2_000.0, 3_000.0);
+        assert_eq!(rows.iter().map(|r| r.2).sum::<f64>(), 200_000.0);
+        assert_eq!(rows[2].2, 95_000.0);
+        // estimates never exceed what is in use
+        let small = super::breakdown(1_000.0, 200_000.0, 5_000.0, 5_000.0);
+        assert_eq!((small[0].2, small[1].2, small[2].2), (1_000.0, 0.0, 0.0));
     }
 
     #[test]
