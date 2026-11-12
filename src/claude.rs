@@ -145,6 +145,18 @@ fn idle_limit() -> u64 {
     std::env::var("SHELLBITS_CLAUDE_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
 }
 static TODOS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Messages typed with Ctrl+Enter while a reply was being written: sent, in order, once it ends.
+static QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Height of the task card pinned above the message box: none once every task is done.
+pub fn task_card_h(todos: &[(String, String)]) -> f32 {
+    if todos.is_empty() || todos.iter().all(|t| t.1 == "completed") { 0.0 } else { 16.0 + todos.len().min(8) as f32 * 28.0 }
+}
+
+/// Tokens left before Claude Code compacts on its own (it keeps a buffer of ~3.3% of the window).
+pub fn until_compact(used: f64, window: f64) -> f64 {
+    (window * (1.0 - 0.033) - used).max(0.0)
+}
 
 fn settings() -> Settings {
     SET.lock().unwrap().clone().unwrap_or_else(|| Settings {
@@ -460,6 +472,7 @@ pub fn verb(tool: &str) -> &'static str {
         "WebSearch" => "searched the web",
         "Agent" | "Task" => "ran an agent",
         "TodoWrite" => "updated the plan",
+        "Thinking" => "thought",
         _ => "used a tool",
     }
 }
@@ -566,6 +579,15 @@ pub fn apply(v: &serde_json::Value, log: &mut Vec<Entry>, live: &mut Option<usiz
                             Some(i) if i < log.len() => log[i].text = t,
                             _ => log.push(Entry::new(Kind::Assistant, t)),
                         }
+                        changed = true;
+                    }
+                    Some("thinking") => {
+                        // shown folded like the app's "Thought" step; the text when the model gives it
+                        *live = None;
+                        let t = b["thinking"].as_str().unwrap_or("").trim();
+                        let mut e = Entry::new(Kind::Tool, if t.is_empty() { "Thought".to_string() } else { t.to_string() });
+                        e.tool = "Thinking".into();
+                        log.push(e);
                         changed = true;
                     }
                     Some("tool_use") => {
@@ -1015,6 +1037,11 @@ fn ensure_proc() -> bool {
                 let changed = apply(&v, &mut LOG.lock().unwrap(), &mut LIVE.lock().unwrap(), false);
                 if is_result {
                     BUSY.store(false, Relaxed);
+                    // the next queued message (Ctrl+Enter) goes now
+                    let next = { let mut q = QUEUE.lock().unwrap(); (!q.is_empty()).then(|| q.remove(0)) };
+                    if let Some(t) = next {
+                        send(t);
+                    }
                 }
                 if changed || is_result {
                     notify();
@@ -1156,6 +1183,9 @@ enum Act {
     Send,
     Stop,
     Attach,
+    Mic,
+    Compact,
+    CopyMsg(usize),
     Model,
     Effort,
     Mode,
@@ -1182,6 +1212,7 @@ struct Ui {
     stick: bool,
     hits: Vec<(D2D_RECT_F, Act)>,
     links: Vec<String>, // addresses of the links on screen, for Act::Link
+    hover_msg: Option<usize>, // the message under the mouse: it shows a copy button
     msgs: Vec<(D2D_RECT_F, String)>, // the messages on screen and their text, for right-click > Copy
     side_scroll: f32, // how far the session list is scrolled
     items: Vec<(Item, f32)>,                             // the conversation, laid out
@@ -1888,6 +1919,14 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                 txt(&share, &g.small, rect(cw - 16.0 - measure(g, &share) - 2.0, py, cw - 8.0, py + 24.0), &white);
                 py += 24.0;
             }
+            let left = until_compact(used, window);
+            txt(&format!("{} until auto-compact", tokens(left)), &g.small, rect(x + 17.0, py + 6.0, cw - 130.0, py + 30.0), &soft);
+            let br = rect(cw - 124.0, py + 4.0, cw - 16.0, py + 30.0);
+            rt.FillRoundedRectangle(&rrect(br, 6.0), &b(if hov(Act::Compact) { 0x3A3A3A } else { 0x2C2C2C })?);
+            let label = "Compact session";
+            txt(label, &g.small, rect(br.left + (br.right - br.left - measure(g, label)) / 2.0, br.top, br.right, br.bottom), &white);
+            hits.push((br, Act::Compact));
+            py += 34.0;
         }
         py += 14.0;
 
@@ -1976,7 +2015,9 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
     let width = COL.min(main_r - main_l - 48.0);
     let x0 = col_x(main_l, cw, main_r, width);
     let view_top = TOP;
-    let view_bot = ch - BOTTOM - 8.0;
+    let card_h = task_card_h(&TODOS.lock().unwrap());
+    let status_h = if BUSY.load(Relaxed) || card_h > 0.0 { 30.0 } else { 0.0 };
+    let view_bot = ch - BOTTOM - 8.0 - card_h - status_h - if card_h > 0.0 { 8.0 } else { 0.0 };
     // Laying the whole conversation out again on every repaint made a long session crawl (85 ms a
     // frame at 4,000 entries): the laid-out items are kept and only rebuilt when something that
     // shapes them changes - the entries, the newest text (streaming), the width, what is expanded.
@@ -2098,18 +2139,68 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         }
         y += h + 20.0;
     }
-    if BUSY.load(Relaxed) {
-        for k in 0..3usize {
-            let a = if (ui.anim as usize % 3) == k { 1.0 } else { 0.35 };
-            let br = rt.CreateSolidColorBrush(&D2D1_COLOR_F { a, ..rgb(C_ACCENT) }, None)?;
-            rt.FillEllipse(&D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: x0 + 4.0 + k as f32 * 9.0, Y: y + 2.0 }, radiusX: 2.5, radiusY: 2.5 }, &br);
+    // copy button under the message the mouse is on (a reply: left, your message: right)
+    if let Some((r, _)) = ui.hover_msg.and_then(|i| msgs.get(i)).cloned() {
+        let i = ui.hover_msg.unwrap_or(0);
+        let mine = r.right >= x0 + width - 1.0 && r.left > x0 + 1.0;
+        let bx = if mine { r.right - 28.0 } else { r.left };
+        let br = rect(bx, r.bottom + 2.0, bx + 28.0, r.bottom + 26.0);
+        if hov(Act::CopyMsg(i)) {
+            rt.FillRoundedRectangle(&rrect(br, 5.0), &b(C_HOVER)?);
         }
-        let ms = windows::Win32::System::SystemInformation::GetTickCount64().saturating_sub(BUSY_SINCE.load(Relaxed));
-        rt.DrawText(&utf16(&status_line(ms)), &g.small, &rect(x0 + 34.0, y - 8.0, x0 + 300.0, y + 12.0), &dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        lucide(rt, "copy", br, 14.0, &dim);
+        hits.push((br, Act::CopyMsg(i)));
     }
     rt.PopAxisAlignedClip();
     ui.items = items;
     ui.items_key = Some(key);
+
+    // ---- task card + status line, pinned above the message box (as in the app) ----
+    let todos = TODOS.lock().unwrap().clone();
+    let mut sy = ch - BOTTOM - 8.0 - status_h;
+    if card_h > 0.0 {
+        let top = sy - card_h - 8.0;
+        let card = rect(x0 - 9.0, top, x0 + width + 15.0, top + card_h);
+        rt.FillRoundedRectangle(&rrect(card, 10.0), &b(0x1F1F1F)?);
+        rt.DrawRoundedRectangle(&rrect(rect(card.left + 0.5, card.top + 0.5, card.right - 0.5, card.bottom - 0.5), 10.0), &b(C_LINE)?, 1.0, None);
+        for (k, (t, status)) in todos.iter().take(8).enumerate() {
+            let yy = top + 8.0 + k as f32 * 28.0;
+            let c = windows_numerics::Vector2 { X: x0 + 9.0, Y: yy + 14.0 };
+            match status.as_str() {
+                "completed" => {
+                    rt.FillEllipse(&D2D1_ELLIPSE { point: c, radiusX: 6.0, radiusY: 6.0 }, &b(0x5A5A5A)?);
+                    txt("\u{2713}", &g.small, rect(c.X - 6.0, yy, c.X + 7.0, yy + 28.0), &white);
+                }
+                "in_progress" => {
+                    rt.DrawEllipse(&D2D1_ELLIPSE { point: c, radiusX: 6.0, radiusY: 6.0 }, &b(C_ACCENT)?, 1.5, None);
+                    rt.FillEllipse(&D2D1_ELLIPSE { point: c, radiusX: 3.0, radiusY: 3.0 }, &b(C_ACCENT)?);
+                }
+                _ => rt.DrawEllipse(&D2D1_ELLIPSE { point: c, radiusX: 6.0, radiusY: 6.0 }, &b(0x8C8C8C)?, 1.0, None),
+            }
+            txt(t, &g.small, rect(x0 + 24.0, yy, x0 + width, yy + 28.0), &b(if status == "completed" { C_DIM } else { 0xE8E8E8 })?);
+        }
+    }
+    if status_h > 0.0 {
+        // spinner (a turning asterisk), what is happening, how long, and a chevron
+        let busy = BUSY.load(Relaxed);
+        let spin = ["\u{2722}", "\u{2733}", "\u{2734}", "\u{2735}"][ui.anim as usize % 4];
+        txt(if busy { spin } else { "\u{2713}" }, &g.small, rect(x0 + 2.0, sy, x0 + 20.0, sy + 26.0), &b(C_ACCENT)?);
+        let what = todos.iter().find(|t| t.1 == "in_progress").map(|t| t.0.clone());
+        let ms = windows::Win32::System::SystemInformation::GetTickCount64().saturating_sub(BUSY_SINCE.load(Relaxed));
+        let mut line = match (&what, busy) {
+            (Some(w), true) => format!("{w}  {}", status_line(ms).trim_start_matches("Working\u{2026} ")),
+            (None, true) => status_line(ms),
+            (Some(w), false) => w.clone(),
+            (None, false) => String::new(),
+        };
+        let queued = QUEUE.lock().unwrap().len();
+        if queued > 0 {
+            line += &format!("  \u{00B7}  {queued} queued");
+        }
+        txt(&format!("{line}  \u{203A}"), &g.small, rect(x0 + 24.0, sy, x0 + width, sy + 26.0), &dim);
+        sy += status_h;
+    }
+    let _ = sy;
 
     // ---- composer ----
     let cr = rect(x0 - 9.0, ch - BOTTOM, x0 + width + 15.0, ch - BOTTOM + COMPOSER_H);
@@ -2123,6 +2214,12 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
     hits.push((plus, Act::Attach));
     let busy = BUSY.load(Relaxed);
     let sr = rect(cr.right - 40.0, cr.top + 6.0, cr.right - 8.0, cr.bottom - 6.0);
+    let mr = rect(sr.left - 34.0, sr.top, sr.left - 2.0, sr.bottom);
+    if hov(Act::Mic) {
+        rt.FillRoundedRectangle(&rrect(mr, 6.0), &b(0x3A3A3A)?);
+    }
+    lucide(rt, "mic", mr, 17.0, &soft);
+    hits.push((mr, Act::Mic));
     if hov(Act::Stop) || hov(Act::Send) {
         rt.FillRoundedRectangle(&rrect(sr, 6.0), &b(0x3A3A3A)?);
     }
@@ -2134,7 +2231,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         hits.push((sr, Act::Send));
     }
     if ui.gfx.is_some() && std::env::var_os("SHELLBITS_SNAPSHOT").is_some() {
-        txt("Enter to send, Shift+Enter for a new line", &g.side, rect(cr.left + 43.0, cr.top, cr.right - 48.0, cr.bottom), &b(0x8C8C8C)?);
+        txt("Enter to send, Ctrl+Enter to queue for later", &g.side, rect(cr.left + 43.0, cr.top, cr.right - 48.0, cr.bottom), &b(0x8C8C8C)?);
     }
     // model / effort / permissions row
     let model = if set.model.is_empty() { MODEL_SHOWN.lock().unwrap().clone() } else { cap(&set.model) };
@@ -2158,6 +2255,20 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         txt(label, &g.small, rect(rx, row_y, rx + w_ + 20.0, row_y + 24.0), &b(col)?);
         hits.push((r, act));
         rx += w_ + 12.0;
+    }
+    // the round context meter after the row
+    if let Some(p) = *CONTEXT.lock().unwrap() {
+        let c = windows_numerics::Vector2 { X: rx + 6.0, Y: row_y + 12.0 };
+        rt.DrawEllipse(&D2D1_ELLIPSE { point: c, radiusX: 6.0, radiusY: 6.0 }, &b(0x3A3A3A)?, 2.0, None);
+        let f: ID2D1Factory = rt.GetFactory()?;
+        let geo = f.CreatePathGeometry()?;
+        let sink = geo.Open()?;
+        let a = (p.clamp(0.0, 99.9) / 100.0) * std::f32::consts::TAU;
+        sink.BeginFigure(windows_numerics::Vector2 { X: c.X, Y: c.Y - 6.0 }, D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.AddArc(&D2D1_ARC_SEGMENT { point: windows_numerics::Vector2 { X: c.X + 6.0 * a.sin(), Y: c.Y - 6.0 * a.cos() }, size: D2D_SIZE_F { width: 6.0, height: 6.0 }, rotationAngle: 0.0, sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE, arcSize: if a > std::f32::consts::PI { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL } });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.Close()?;
+        rt.DrawGeometry(&geo, &b(if p > 90.0 { 0xF2B04D } else { C_ACCENT })?, 2.0, None);
     }
     ui.hits = hits;
     ui.links = links;
@@ -2406,6 +2517,51 @@ unsafe fn picture_only() -> bool {
     IsClipboardFormatAvailable(2).is_ok() && IsClipboardFormatAvailable(13).is_err()
 }
 
+/// Files and folders under `dir` for the @ menu: two levels deep, build/dependency folders skipped,
+/// paths relative with forward slashes, folders first, at most `max`.
+pub fn mention_list(dir: &std::path::Path, max: usize) -> Vec<String> {
+    let mut v = Vec::new();
+    fn rec(d: &std::path::Path, prefix: &str, depth: usize, v: &mut Vec<String>) {
+        const SKIP: [&str; 6] = ["target", "node_modules", ".git", "dist", "build", "__pycache__"];
+        let mut es: Vec<(String, bool)> = std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| (e.file_name().to_string_lossy().to_string(), e.path().is_dir())).filter(|(n, _)| !SKIP.contains(&n.as_str())).collect();
+        es.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+        for (n, is_dir) in es {
+            let rel = format!("{prefix}{n}{}", if is_dir { "/" } else { "" });
+            v.push(rel.clone());
+            if is_dir && depth > 0 {
+                rec(&d.join(&n), &rel, depth - 1, v);
+            }
+        }
+    }
+    rec(dir, "", 1, &mut v);
+    v.truncate(max);
+    v
+}
+
+/// Typing '@' at the start or after a space lists the session folder's files; the pick is inserted.
+unsafe fn mention_menu(edit: HWND) -> bool {
+    let list = mention_list(std::path::Path::new(&settings().folder), 60);
+    if list.is_empty() {
+        return false;
+    }
+    let Ok(m) = CreatePopupMenu() else { return false };
+    for (k, n) in list.iter().enumerate() {
+        let _ = AppendMenuW(m, MF_STRING, k + 1, &windows::core::HSTRING::from(n.as_str()));
+    }
+    let mut r = RECT::default();
+    let _ = GetWindowRect(edit, &mut r);
+    let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, r.left, r.top - 4, None, GetParent(edit).unwrap_or(edit), None).0;
+    let _ = DestroyMenu(m);
+    let ins = if cmd > 0 {
+        let p = &list[cmd as usize - 1];
+        if p.contains(' ') { format!("@\"{p}\" ") } else { format!("@{p} ") }
+    } else {
+        "@".to_string()
+    };
+    SendMessageW(edit, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(windows::core::HSTRING::from(ins.as_str()).as_ptr() as isize)));
+    true
+}
+
 /// Ctrl+V with a picture on the clipboard: save it as a PNG and mention it, so it is sent as an image.
 unsafe fn paste_picture(edit: HWND) -> bool {
     use windows::Win32::System::DataExchange::*;
@@ -2431,6 +2587,16 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     if msg == WM_CHAR && wp.0 == '/' as usize && GetWindowTextLengthW(hwnd) == 0 && slash_menu(hwnd) {
         return LRESULT(0);
     }
+    if msg == WM_CHAR && wp.0 == '@' as usize {
+        // only at a word start: not inside an e-mail address
+        let t = edit_text(hwnd);
+        let mut caret = 0u32;
+        SendMessageW(hwnd, EM_GETSEL, Some(WPARAM(&mut caret as *mut _ as usize)), None);
+        let before: Vec<u16> = t.encode_utf16().take(caret as usize).collect();
+        if before.last().is_none_or(|c| *c == b' ' as u16 || *c == b'\n' as u16) && mention_menu(hwnd) {
+            return LRESULT(0);
+        }
+    }
     if (msg == WM_PASTE || (msg == WM_KEYDOWN && wp.0 == 'V' as usize && GetKeyState(VK_CONTROL.0 as i32) < 0)) && paste_picture(hwnd) {
         return LRESULT(0);
     }
@@ -2453,7 +2619,7 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         let old = SelectObject(dc, font.into());
         SetTextColor(dc, COLORREF(0x8C8C8C));
         SetBkMode(dc, TRANSPARENT);
-        let mut t: Vec<u16> = "Enter to send, Shift+Enter for a new line".encode_utf16().collect();
+        let mut t: Vec<u16> = "Enter to send, Ctrl+Enter to queue for later".encode_utf16().collect();
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
         DrawTextW(dc, &mut t, &mut rc, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
@@ -2475,6 +2641,15 @@ unsafe fn edit_text(e: HWND) -> String {
 
 unsafe fn submit(edit: HWND) {
     let text = edit_text(edit);
+    // Ctrl+Enter while a reply is being written: queue it for later, like the app
+    if BUSY.load(Relaxed) && GetKeyState(VK_CONTROL.0 as i32) < 0 {
+        if !text.trim().is_empty() {
+            QUEUE.lock().unwrap().push(text);
+            let _ = SetWindowTextW(edit, w!(""));
+            notify();
+        }
+        return;
+    }
     let _ = SetWindowTextW(edit, w!(""));
     UI.with(|u| u.borrow_mut().stick = true);
     send(text);
@@ -2606,6 +2781,19 @@ unsafe fn click(hwnd: HWND, act: Act) {
         Act::Deny(i) => answer(i, false),
         Act::Send => submit(HWND(EDIT.load(Relaxed) as *mut c_void)),
         Act::Stop => interrupt(),
+        Act::Mic => {
+            // Windows' own voice typing (Win+H) types into the message box
+            let e = HWND(EDIT.load(Relaxed) as *mut c_void);
+            let _ = SetFocus(Some(e));
+            let k = |vk: VIRTUAL_KEY, up: bool| INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } } };
+            SendInput(&[k(VK_LWIN, false), k(VK_H, false), k(VK_H, true), k(VK_LWIN, true)], size_of::<INPUT>() as i32);
+        }
+        Act::Compact => send("/compact".into()),
+        Act::CopyMsg(i) => {
+            if let Some(t) = UI.with(|u| u.borrow().msgs.get(i).map(|m| m.1.clone())) {
+                crate::settings::copy_text(&t);
+            }
+        }
         Act::Attach => {
             if let Some(f) = pick(hwnd, false) {
                 let e = HWND(EDIT.load(Relaxed) as *mut c_void);
@@ -2912,6 +3100,10 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_MOUSEMOVE => {
             let (x, y) = dips(lp);
             let h = hit(x, y);
+            let m = UI.with(|u| u.borrow().msgs.iter().position(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom + 28.0));
+            if UI.with(|u| std::mem::replace(&mut u.borrow_mut().hover_msg, m) != m) {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
             if UI.with(|u| std::mem::replace(&mut u.borrow_mut().hover, h) != h) {
                 let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                 let _ = TrackMouseEvent(&mut tme);
@@ -3024,6 +3216,14 @@ pub unsafe fn snapshot(path: &str) -> windows::core::Result<()> {
         });
         UI.with(|u| u.borrow_mut().selected = Some(pick));
         // SHELLBITS_PANE=files|diff: show that docked pane in the snapshot
+        // SHELLBITS_TODOS="text|status;...": a task list to show in the snapshot
+        if let Ok(t) = std::env::var("SHELLBITS_TODOS") {
+            *TODOS.lock().unwrap() = t.split(';').filter_map(|x| x.split_once('|')).map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        }
+        if std::env::var_os("SHELLBITS_BUSY").is_some() {
+            BUSY.store(true, Relaxed);
+            BUSY_SINCE.store(windows::Win32::System::SystemInformation::GetTickCount64() - 11_000, Relaxed);
+        }
         match std::env::var("SHELLBITS_PANE").unwrap_or_default().as_str() {
             "files" => UI.with(|u| {
                 let u = &mut *u.borrow_mut();
@@ -3135,6 +3335,28 @@ mod tests {
         let cfg = serde_json::json!({"mcpServers": {"a": {"command": "x"}}, "projects": {"C:/Work/app": {"mcpServers": {"kaggle": {"type": "http"}, "a": {}}}}});
         assert_eq!(super::connectors(&cfg, r"C:\work\app\"), vec![("a".to_string(), "stdio".to_string()), ("kaggle".to_string(), "http".to_string())]);
         assert_eq!(super::connectors(&cfg, "D:/other").len(), 1);
+    }
+
+    #[test]
+    fn task_card_and_compact_room() {
+        let t = |s: &str| (String::from("x"), s.to_string());
+        assert_eq!(super::task_card_h(&[]), 0.0);
+        assert_eq!(super::task_card_h(&[t("completed"), t("completed")]), 0.0);
+        assert_eq!(super::task_card_h(&[t("completed"), t("pending")]), 72.0);
+        assert_eq!(super::until_compact(918_300.0, 1_000_000.0).round(), 48_700.0); // the app showed "48k" here
+        assert_eq!(super::until_compact(990_000.0, 1_000_000.0), 0.0);
+    }
+
+    #[test]
+    fn mentions_list_folders_first_and_skip_build_dirs() {
+        let d = std::env::temp_dir().join("shellbits-mention-test");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("target")).unwrap();
+        std::fs::write(d.join("src").join("main.rs"), "").unwrap();
+        std::fs::write(d.join("a b.txt"), "").unwrap();
+        assert_eq!(super::mention_list(&d, 10), vec!["src/", "src/main.rs", "a b.txt"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
