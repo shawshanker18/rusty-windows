@@ -1268,6 +1268,54 @@ fn sticky() -> bool {
 fn set_sticky(on: bool) {
     crate::qsx::toggle_access(5, !on);
 }
+fn magnifier() -> bool { access(0) }
+fn set_magnifier(on: bool) { crate::qsx::toggle_access(0, !on); }
+fn color_filters() -> bool { access(1) }
+fn set_color_filters(on: bool) { crate::qsx::toggle_access(1, !on); }
+fn narrator() -> bool { access(2) }
+fn set_narrator(on: bool) { crate::qsx::toggle_access(2, !on); }
+
+// Accessibility > Keyboard: the classic accessibility switches, through SystemParametersInfo
+fn spi_flags(get: u32, size: u32) -> u32 {
+    // FILTERKEYS / TOGGLEKEYS both start with cbSize then dwFlags
+    let mut buf = [0u32; 6];
+    buf[0] = size;
+    unsafe { let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(get), size, Some(buf.as_mut_ptr() as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    buf[1]
+}
+fn set_spi_flag(get: u32, set: u32, size: u32, on: bool) {
+    let mut buf = [0u32; 6];
+    buf[0] = size;
+    unsafe {
+        let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(get), size, Some(buf.as_mut_ptr() as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+        buf[1] = if on { buf[1] | 1 } else { buf[1] & !1 }; // the *_ON bit
+        let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(set), size, Some(buf.as_mut_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    }
+}
+fn filter_keys() -> bool { spi_flags(0x0032, 24) & 1 != 0 } // SPI_GETFILTERKEYS, FILTERKEYS is 24 bytes
+fn set_filter_keys(on: bool) { set_spi_flag(0x0032, 0x0033, 24, on) }
+fn toggle_keys() -> bool { spi_flags(0x0034, 8) & 1 != 0 } // SPI_GETTOGGLEKEYS
+fn set_toggle_keys(on: bool) { set_spi_flag(0x0034, 0x0035, 8, on) }
+fn access_keys() -> bool { spi_u32(0x100A) != 0 } // SPI_GETKEYBOARDCUES
+fn set_access_keys(on: bool) { set_spi(0x100B, on as u32) }
+reg_switch!(prtscn_snip, set_prtscn_snip, r"Control Panel\Keyboard", "PrintScreenKeyForSnippingEnabled", on = 1, off = 0, missing = true);
+
+// Privacy & security > Camera / Microphone / Location: this user's "let apps use ..." switch
+const CONSENT: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\";
+fn consent(what: &str) -> bool {
+    reg_str(HKEY_CURRENT_USER, PCWSTR(HSTRING::from(format!("{CONSENT}{what}")).as_ptr()), w!("Value")) != "Deny"
+}
+fn set_consent(what: &str, on: bool) {
+    let v: Vec<u16> = (if on { "Allow" } else { "Deny" }).encode_utf16().chain([0]).collect();
+    unsafe { let _ = RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(format!("{CONSENT}{what}")), w!("Value"), REG_SZ.0, Some(v.as_ptr() as *const c_void), (v.len() * 2) as u32); }
+}
+fn camera_ok() -> bool { consent("webcam") }
+fn set_camera_ok(on: bool) { set_consent("webcam", on) }
+fn mic_ok() -> bool { consent("microphone") }
+fn set_mic_ok(on: bool) { set_consent("microphone", on) }
+fn location_ok() -> bool { consent("location") }
+fn set_location_ok(on: bool) { set_consent("location", on) }
+
 fn mono() -> bool {
     access(3)
 }
@@ -1785,6 +1833,41 @@ fn pages() -> Vec<Page> {
             r(0xE8AB, "Show tabs from apps when snapping or pressing Alt+Tab", "", Choice(alt_tab, alt_tabs, set_alt_tab)),
             r(0xE7C4, "Title bar window shake", "When I grab a window's title bar and shake it, minimize all other windows", Toggle(shake, set_shake)),
         ]),
+        sub("Magnifier", "Accessibility", vec![
+            r(0xE8A3, "Magnifier", "Windows logo key + Plus to turn on, Windows logo key + Esc to turn off", Toggle(magnifier, set_magnifier)),
+            r(0xE713, "Zoom increment, views and reading", "In Windows' own page", Sub("Magnifier")),
+        ]),
+        sub("Color filters", "Accessibility", vec![
+            r(0xE790, "Color filters", "Make photos and colors easier to see", Toggle(color_filters, set_color_filters)),
+            r(0xE713, "Filter type", "Grayscale, inverted, red-green, blue-yellow - in Windows' own page", Link("ms-settings:easeofaccess-colorfilter")),
+        ]),
+        sub("Narrator", "Accessibility", vec![
+            r(0xED4D, "Narrator", "A screen reader that describes what's on your screen", Toggle(narrator, set_narrator)),
+            r(0xE713, "Voice, verbosity and braille", "In Windows' own page", Link("ms-settings:easeofaccess-narrator")),
+        ]),
+        sub("Audio", "Accessibility", vec![
+            r(0xE767, "Mono audio", "Combine left and right audio channels into one", Toggle(mono, set_mono)),
+        ]),
+        sub("Keyboard", "Accessibility", vec![
+            r(0xE765, "Sticky keys", "Press one key at a time for keyboard shortcuts", Toggle(sticky, set_sticky)),
+            r(0xE765, "Filter keys", "Ignore brief or repeated keystrokes", Toggle(filter_keys, set_filter_keys)),
+            r(0xE765, "Toggle keys", "Play a sound when you press Caps lock, Num lock, or Scroll lock", Toggle(toggle_keys, set_toggle_keys)),
+            r(0xE765, "Underline access keys", "Access keys are underlined even when not holding Alt", Toggle(access_keys, set_access_keys)),
+            r(0xE722, "Use the Print screen key to open screen capture", "", Toggle(prtscn_snip, set_prtscn_snip)),
+            r(0xE765, "On-screen keyboard", "In Windows' own page", Link("ms-settings:easeofaccess-keyboard")),
+        ]),
+        sub("Camera", "Privacy & security", vec![
+            r(0xE722, "Camera access", "Let apps use your camera", Toggle(camera_ok, set_camera_ok)),
+            r(0xE713, "Choose which apps can use your camera", "In Windows' own page", Link("ms-settings:privacy-webcam")),
+        ]),
+        sub("Microphone", "Privacy & security", vec![
+            r(0xE720, "Microphone access", "Let apps use your microphone", Toggle(mic_ok, set_mic_ok)),
+            r(0xE713, "Choose which apps can use your microphone", "In Windows' own page", Link("ms-settings:privacy-microphone")),
+        ]),
+        sub("Location", "Privacy & security", vec![
+            r(0xE81D, "Location services", "Let apps use your location (the device-wide switch needs an administrator)", Toggle(location_ok, set_location_ok)),
+            r(0xE713, "Choose which apps can use your location", "In Windows' own page", Link("ms-settings:privacy-location")),
+        ]),
         sub("Visual effects", "Accessibility", vec![
             r(0xE794, "Always show scrollbars", "", Toggle(always_scrollbars, set_always_scrollbars)),
             r(0xE794, "Transparency effects", "", Toggle(transparency, set_transparency)),
@@ -1870,16 +1953,16 @@ fn pages() -> Vec<Page> {
             r(0xE7C9, "Mouse pointer and touch", "Mouse pointer color, size", Link("ms-settings:easeofaccess-mousepointer")),
             r(SET | 0xE330, "Text cursor", "Appearance and thickness, text cursor indicator", Link("ms-settings:easeofaccess-cursor")),
             r(0xE8A3, "Magnifier", "Magnifier reading, zoom increment", Link("ms-settings:easeofaccess-magnifier")),
-            r(0xE790, "Color filters", "Colorblindness filters, grayscale, inverted", Link("ms-settings:easeofaccess-colorfilter")),
+            r(0xE790, "Color filters", "Colorblindness filters, grayscale, inverted", Sub("Color filters")),
             r(0xE81E, "Screen tint", "Add a subtle color overlay to make your screen more comfortable to view", Link("ms-settings:easeofaccess-colorfilter")),
             r(0xE7A1, "Contrast themes", "Color themes for low vision, light sensitivity", Link("ms-settings:easeofaccess-highcontrast")),
-            r(0xED4D, "Narrator", "Voice, verbosity, keyboard, braille", Link("ms-settings:easeofaccess-narrator")),
+            r(0xED4D, "Narrator", "Voice, verbosity, keyboard, braille", Sub("Narrator")),
             r(0, "Hearing", "", Header),
-            r(0xE767, "Audio", "Mono audio, audio notifications", Link("ms-settings:easeofaccess-audio")),
+            r(0xE767, "Audio", "Mono audio, audio notifications", Sub("Audio")),
             r(0xE7F0, "Captions", "Styles, live captions", Link("ms-settings:easeofaccess-closedcaptioning")),
             r(0, "Interaction", "", Header),
             r(0xE720, "Speech", "Voice access, voice typing, Windows Speech Recognition", Link("ms-settings:easeofaccess-speechrecognition")),
-            r(0xE765, "Keyboard", "Sticky, Filter, and Toggle keys, on-screen keyboard", Link("ms-settings:easeofaccess-keyboard")),
+            r(0xE765, "Keyboard", "Sticky, Filter, and Toggle keys, on-screen keyboard", Sub("Keyboard")),
             r(0xE765, "Sticky keys", "Press one key at a time for keyboard shortcuts", Toggle(sticky, set_sticky)),
             r(0xE962, "Mouse", "Mouse keys, speed, acceleration", Link("ms-settings:easeofaccess-mouse")),
             r(0xE7B3, "Eye control", "Eye tracker, text-to-speech", Link("ms-settings:easeofaccess-eyecontrol")),
@@ -1895,9 +1978,9 @@ fn pages() -> Vec<Page> {
             r(0xE9D9, "Diagnostics & feedback", "Diagnostic data, inking and typing data, feedback frequency", Link("ms-settings:privacy-feedback")),
             r(0xE773, "Search", "Search history, search apps, cloud content search, search indexing", Link("ms-settings:search")),
             r(0, "App permissions", "", Section),
-            r(0xE81D, "Location", "", Link("ms-settings:privacy-location")),
-            r(0xE722, "Camera", "", Link("ms-settings:privacy-webcam")),
-            r(0xE720, "Microphone", "", Link("ms-settings:privacy-microphone")),
+            r(0xE81D, "Location", "", Sub("Location")),
+            r(0xE722, "Camera", "", Sub("Camera")),
+            r(0xE720, "Microphone", "", Sub("Microphone")),
             r(0xEA8F, "Notifications", "", Link("ms-settings:privacy-notifications")),
         ]),
         top("Windows Update", 0xE895, vec![
