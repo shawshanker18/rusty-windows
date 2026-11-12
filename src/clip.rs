@@ -81,7 +81,7 @@ pub fn thumb_sizes() -> Vec<(u32, u32)> {
     THUMBS.lock().unwrap().iter().map(|t| (t.1, t.2)).collect()
 }
 const THUMB_W: u32 = 300;
-const THUMB_H: u32 = 48;
+const THUMB_H: u32 = 96;
 
 /// The size a w x h picture is drawn at to fit max_w x max_h, keeping its shape (never enlarged).
 pub fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
@@ -174,8 +174,21 @@ fn rows(st: &State) -> usize {
     if st.items.is_empty() { 1 } else { st.items.len().min(MAX_ROWS) }
 }
 
+/// A picture's card is taller than a text card, like Windows' own.
+const PIC_ROW: f32 = 112.0;
+fn row_h(st: &State, i: usize) -> f32 {
+    if st.items.get(i).is_some_and(|it| it.1.is_empty()) { PIC_ROW } else { ROW }
+}
+/// Top of the k-th card shown (k counted from the first one on screen).
+fn row_top(st: &State, k: usize) -> f32 {
+    HEAD + (st.top..st.top + k).map(|i| row_h(st, i) + GAP).sum::<f32>()
+}
+
 fn height(st: &State) -> f32 {
-    HEAD + rows(st) as f32 * (ROW + GAP) + PAD - GAP
+    if st.items.is_empty() {
+        return HEAD + ROW + PAD;
+    }
+    row_top(st, rows(st)) + PAD - GAP
 }
 
 /// The item under a point of the panel (index into items), if any.
@@ -183,8 +196,10 @@ fn row_at(st: &State, y: f32) -> Option<usize> {
     if y < HEAD || st.items.is_empty() {
         return None;
     }
-    let i = ((y - HEAD) / (ROW + GAP)) as usize;
-    (i < st.items.len().min(MAX_ROWS) && (y - HEAD) - i as f32 * (ROW + GAP) < ROW && st.top + i < st.items.len()).then_some(st.top + i)
+    (0..rows(st)).filter(|k| st.top + k < st.items.len()).find(|k| {
+        let t = row_top(st, *k);
+        y >= t && y < t + row_h(st, st.top + k)
+    }).map(|k| st.top + k)
 }
 
 /// "Clear all" in the header, and the delete button at the right of a row (panel units).
@@ -447,18 +462,19 @@ unsafe fn draw(dc: HDC, rc: &RECT, s: f32, st: &State) -> windows::core::Result<
         txt("Clear all", &right, rect(c.0, c.1, c.2, c.3), if st.hover_clear { 0xFFFFFF } else { 0xC5C5C5 })?;
     }
     for (i, (_, text)) in st.items.iter().enumerate().skip(st.top).take(MAX_ROWS) {
-        let y = HEAD + (i - st.top) as f32 * (ROW + GAP);
-        let card = rect(PAD, y, w - PAD, y + ROW);
+        let y = row_top(st, i - st.top);
+        let rh = row_h(st, i);
+        let card = rect(PAD, y, w - PAD, y + rh);
         rt.FillRoundedRectangle(&rrect(card, 4.0), &b(if st.hover == Some(i) { 0x454545 } else { 0x383838 })?);
         if i == st.sel {
-            rt.FillRoundedRectangle(&rrect(rect(PAD, y + 18.0, PAD + 3.0, y + ROW - 18.0), 1.5), &b(0x4CC2FF)?);
+            rt.FillRoundedRectangle(&rrect(rect(PAD, y + 18.0, PAD + 3.0, y + rh - 18.0), 1.5), &b(0x4CC2FF)?);
         }
         let id = &st.items[i].0;
         let thumb = THUMBS.lock().unwrap().iter().find(|t| &t.0 == id).map(|t| (t.1, t.2, t.3.clone()));
         if let Some((tw, th, px)) = thumb {
             let props = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
             if let Ok(bmp) = rt.CreateBitmap(D2D_SIZE_U { width: tw, height: th }, Some(px.as_ptr() as *const c_void), tw * 4, &props) {
-                let top = y + (ROW - th as f32) / 2.0;
+                let top = y + (rh - th as f32) / 2.0;
                 rt.DrawBitmap(&bmp, Some(&rect(PAD + 12.0, top, PAD + 12.0 + tw as f32, top + th as f32)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
             }
         } else {
@@ -468,7 +484,7 @@ unsafe fn draw(dc: HDC, rc: &RECT, s: f32, st: &State) -> windows::core::Result<
             let x = font(12.0, DWRITE_FONT_WEIGHT_NORMAL)?;
             x.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             x.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            txt("\u{2715}", &x, rect(w - PAD - 34.0, y, w - PAD - 6.0, y + ROW), if st.hover_x { 0xFFFFFF } else { 0x9A9A9A })?;
+            txt("\u{2715}", &x, rect(w - PAD - 34.0, y, w - PAD - 6.0, y + rh), if st.hover_x { 0xFFFFFF } else { 0x9A9A9A })?;
         }
     }
     rt.EndDraw(None, None)
@@ -480,6 +496,9 @@ mod tests {
     #[test]
     fn picture_fit() {
         assert_eq!(fit(1920, 1080, 300, 48), (85, 48));
+        let st = State { items: vec![("1".into(), "text".into()), ("2".into(), String::new()), ("3".into(), "t".into())], ..Default::default() };
+        assert_eq!(row_at(&st, HEAD + ROW + GAP + 100.0), Some(1)); // inside the tall picture card
+        assert_eq!(row_at(&st, HEAD + ROW + GAP + PIC_ROW + GAP + 5.0), Some(2));
         assert_eq!(fit(3000, 100, 300, 48), (300, 10));
         assert_eq!(fit(20, 10, 300, 48), (20, 10)); // small pictures are not enlarged
         assert_eq!(fit(0, 10, 300, 48), (0, 0));

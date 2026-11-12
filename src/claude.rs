@@ -132,6 +132,25 @@ pub fn inherited_session_vars(names: &[String]) -> Vec<&str> {
 
 /// Is the `claude` tool itself signed in to a Claude account (its own stored sign-in, the one
 /// `claude auth login` makes)? Only then can a session run on the user's Claude plan.
+/// The Settings pane's lines (label, value) from Claude Code's own settings.json and sign-in file.
+/// Secret values are never shown: environment entries are listed by name only.
+pub fn settings_lines(settings_json: &str, credentials_json: &str) -> Vec<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(settings_json).unwrap_or_default();
+    let s = |x: &serde_json::Value, d: &str| x.as_str().map(String::from).unwrap_or_else(|| d.to_string());
+    let env: Vec<String> = v["env"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let allow = v["permissions"]["allow"].as_array().map_or(0, |a| a.len());
+    let deny = v["permissions"]["deny"].as_array().map_or(0, |a| a.len());
+    vec![
+        ("Claude plan".into(), if plan_signed_in(credentials_json) { "Signed in".into() } else { "Not signed in - use Sign in below".into() }),
+        ("Default model".into(), s(&v["model"], "Claude Code's default")),
+        ("Default permission mode".into(), match v["permissions"]["defaultMode"].as_str().unwrap_or("") {
+            "acceptEdits" => "Accept edits", "plan" => "Plan mode", "bypassPermissions" => "Bypass permissions", _ => "Ask permissions" }.into()),
+        ("Allowed / denied rules".into(), format!("{allow} / {deny}")),
+        ("Environment overrides".into(), if env.is_empty() { "None".into() } else { env.join(", ") }),
+        ("Output style".into(), s(&v["outputStyle"], "Default")),
+    ]
+}
+
 pub fn plan_signed_in(credentials_json: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(credentials_json).ok().is_some_and(|v| v["claudeAiOauth"]["accessToken"].as_str().is_some_and(|t| !t.is_empty()))
 }
@@ -211,6 +230,7 @@ pub enum Pane {
     Diff,
     Terminal,
     Preview,
+    Settings,
 }
 const PANE_W: f32 = 520.0;
 
@@ -867,20 +887,48 @@ pub fn parse_app_session(json: &str) -> Option<(String, AppInfo)> {
     }))
 }
 
+/// The sidebar groups you made in the app ("cracking tutti" ...), from its claude_desktop_config.json
+/// (preferences.epitaxyPrefs.dframe-group-scopes, every scope): app session key "local_<id>" -> group name.
+pub fn user_groups(config: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(config) else { return out };
+    for scope in v["preferences"]["epitaxyPrefs"]["dframe-group-scopes"].as_object().into_iter().flat_map(|m| m.values()) {
+        let names: std::collections::HashMap<&str, &str> = scope["groups"].as_array().into_iter().flatten().filter_map(|g| Some((g["id"].as_str()?, g["name"].as_str()?))).collect();
+        for (key, gid) in scope["assignments"].as_object().into_iter().flatten() {
+            if let (Some(local), Some(name)) = (key.strip_prefix("code:"), gid.as_str().and_then(|g| names.get(g))) {
+                out.insert(local.to_string(), name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Session id -> the user-made group it sits in (read with the app's records).
+static GROUP_OF: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+
 /// Every session the desktop app knows, by CLI session id. Empty when the app is not installed.
 fn app_sessions() -> std::collections::HashMap<String, AppInfo> {
-    let root = std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("Claude").join("claude-code-sessions");
+    let app_dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("Claude");
+    let root = app_dir.join("claude-code-sessions");
+    let groups = user_groups(&std::fs::read_to_string(app_dir.join("claude_desktop_config.json")).unwrap_or_default());
+    let mut group_of = std::collections::HashMap::new();
     let mut out = std::collections::HashMap::new();
     for a in std::fs::read_dir(root).into_iter().flatten().flatten() {
         for b in std::fs::read_dir(a.path()).into_iter().flatten().flatten() {
             for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
                 let name = f.file_name().to_string_lossy().to_string();
                 if name.starts_with("local_") && name.ends_with(".json") {
-                    out.extend(std::fs::read_to_string(f.path()).ok().and_then(|t| parse_app_session(&t)));
+                    if let Some((id, info)) = std::fs::read_to_string(f.path()).ok().and_then(|t| parse_app_session(&t)) {
+                        if let Some(g) = groups.get(name.trim_end_matches(".json")) {
+                            group_of.insert(id.clone(), g.clone());
+                        }
+                        out.insert(id, info);
+                    }
                 }
             }
         }
     }
+    *GROUP_OF.lock().unwrap() = Some(group_of);
     out
 }
 
@@ -1241,6 +1289,7 @@ enum Act {
     Mic,
     Compact,
     CopyMsg(usize),
+    SettingsAct(usize),
     Model,
     Effort,
     Mode,
@@ -1852,6 +1901,7 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
             Pane::Diff => "Changes".to_string(),
             Pane::Terminal => "Terminal".to_string(),
             Pane::Preview => "Preview".to_string(),
+            Pane::Settings => "Settings".to_string(),
         };
         txt(&title, &g.side, rect(x + 17.0, TOP + 8.0, cw - 48.0, TOP + 36.0), &white);
         let close = rect(cw - 40.0, TOP + 8.0, cw - 12.0, TOP + 36.0);
@@ -1910,6 +1960,25 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                 rt.FillRoundedRectangle(&rrect(boxr, 8.0), &b(0x1A1A1A)?);
                 rt.DrawRoundedRectangle(&rrect(boxr, 8.0), &b(C_SEL)?, 1.0, None);
                 txt(">", &g.mono, rect(x + 20.0, bot - 38.0, x + 34.0, bot - 4.0), &b(0x6CB4EE)?);
+            }
+            Pane::Settings => {
+                let home = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude");
+                let rd = |f: &str| std::fs::read_to_string(home.join(f)).unwrap_or_default();
+                let mut yy = top;
+                for (label, value) in settings_lines(&rd("settings.json"), &rd(".credentials.json")) {
+                    txt(&label, &g.small, rect(x + 17.0, yy, cw - 16.0, yy + 20.0), &soft);
+                    txt(&value, &g.side, rect(x + 17.0, yy + 18.0, cw - 16.0, yy + 42.0), &white);
+                    yy += 50.0;
+                }
+                yy += 6.0;
+                for (k, label) in ["Sign in with your Claude plan\u{2026}", "Open settings.json in Notepad", "Account settings on claude.ai"].iter().enumerate() {
+                    let r = rect(x + 14.0, yy, cw - 14.0, yy + 34.0);
+                    rt.FillRoundedRectangle(&rrect(r, 7.0), &b(if hov(Act::SettingsAct(k)) { 0x3A3A3A } else { 0x2C2C2C })?);
+                    txt(label, &g.side, rect(r.left + 14.0, r.top, r.right, r.bottom), &white);
+                    hits.push((r, Act::SettingsAct(k)));
+                    yy += 42.0;
+                }
+                txt(&format!("Rust UI {} \u{00B7} claude tool: {}", env!("CARGO_PKG_VERSION"), claude_exe()), &g.small, rect(x + 17.0, yy + 8.0, cw - 16.0, yy + 30.0), &dim);
             }
             Pane::Preview => {
                 // the app previews a running dev server; here: the local servers, click opens one
@@ -2440,7 +2509,8 @@ pub fn grouped(sessions: &[SessionInfo], pins: &[String], filter: &str) -> Vec<(
             pinned.push(i);
             continue;
         }
-        let name = folder_label(&s.cwd);
+        // a group you made in the app wins over the folder
+        let name = GROUP_OF.lock().unwrap().as_ref().and_then(|m| m.get(&s.id).cloned()).unwrap_or_else(|| folder_label(&s.cwd));
         match groups.iter_mut().find(|g| g.0 == name) {
             Some(g) => g.1.push(i),
             None => groups.push((name, vec![i])),
@@ -2758,7 +2828,12 @@ unsafe fn gear_menu(hwnd: HWND) {
         MessageBoxW(Some(hwnd), &windows::core::HSTRING::from(text), &windows::core::HSTRING::from(title), MB_OK | MB_ICONINFORMATION);
     };
     match pick.as_str() {
-        "settings" => open("https://claude.ai/settings", ""),
+        "settings" => {
+            // a docked Settings pane, like the app's settings page
+            UI.with(|u| u.borrow_mut().pane = Some(Pane::Settings));
+            place_edit(hwnd);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
         // signing in is the user's own step: it opens a terminal with Claude Code's own sign-in, which asks in the browser
         "login" if !signed_in => open("cmd.exe", &format!("/k \"{}\" auth login", claude_exe())),
         "login" => say("Claude plan", "The claude tool is signed in to a Claude account, so this window uses your plan."),
@@ -2871,6 +2946,23 @@ unsafe fn click(hwnd: HWND, act: Act) {
             SendInput(&[k(VK_LWIN, false), k(VK_H, false), k(VK_H, true), k(VK_LWIN, true)], size_of::<INPUT>() as i32);
         }
         Act::Compact => send("/compact".into()),
+        Act::SettingsAct(k) => {
+            let open = |what: &str, args: &str| {
+                windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(what), &windows::core::HSTRING::from(args), PCWSTR::null(), SW_SHOWNORMAL);
+            };
+            match k {
+                // signing in is the user's own step, in Claude Code's own sign-in
+                0 => open("cmd.exe", &format!("/k \"{}\" auth login", claude_exe())),
+                1 => {
+                    let f = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude").join("settings.json");
+                    crate::notepad::request(&f.display().to_string());
+                    if let Ok(fly) = FindWindowW(w!("shellbits_flyout"), None) {
+                        let _ = PostMessageW(Some(fly), WM_HOTKEY, WPARAM(crate::NOTEPAD_ID as usize), LPARAM(0));
+                    }
+                }
+                _ => open("https://claude.ai/settings", ""),
+            }
+        }
         Act::CopyMsg(i) => {
             if let Some(t) = UI.with(|u| u.borrow().msgs.get(i).map(|m| m.1.clone())) {
                 crate::settings::copy_text(&t);
@@ -3321,6 +3413,7 @@ pub unsafe fn snapshot(path: &str) -> windows::core::Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
                 UI.with(|u| { let u = &mut *u.borrow_mut(); u.pane = Some(Pane::Terminal); u.pane_scroll = f32::MAX; });
             }
+            "settings" => UI.with(|u| u.borrow_mut().pane = Some(Pane::Settings)),
             "preview" => {
                 load_servers();
                 std::thread::sleep(std::time::Duration::from_millis(2500));
@@ -3447,6 +3540,27 @@ mod tests {
             assert_eq!(super::unbase64(&super::base64(data)).unwrap(), data);
         }
         assert!(super::unbase64("ab$c").is_none());
+    }
+
+    #[test]
+    fn user_groups_from_app_config() {
+        let cfg = r#"{"preferences":{"epitaxyPrefs":{"dframe-group-scopes":{"a/b":{"groups":[{"id":"cg-1","name":"cracking tutti","mode":"code"}],"assignments":{"code:local_x":"cg-1","code:local_y":"cg-gone","chat:z":"cg-1"}}}}}}"#;
+        let g = super::user_groups(cfg);
+        assert_eq!(g.get("local_x").map(String::as_str), Some("cracking tutti"));
+        assert_eq!(g.len(), 1);
+        assert!(super::user_groups("not json").is_empty());
+    }
+
+    #[test]
+    fn settings_pane_hides_secrets() {
+        let l = super::settings_lines(r#"{"model":"sonnet","env":{"ANTHROPIC_AUTH_TOKEN":"secret-123","X":"1"},"permissions":{"allow":["a","b"],"defaultMode":"plan"}}"#, "{}");
+        let all = format!("{l:?}");
+        assert!(!all.contains("secret-123"));
+        assert!(all.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert_eq!(l[1].1, "sonnet");
+        assert_eq!(l[2].1, "Plan mode");
+        assert_eq!(l[3].1, "2 / 0");
+        assert!(l[0].1.starts_with("Not signed in"));
     }
 
     #[test]
