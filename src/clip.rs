@@ -1,4 +1,4 @@
-//! Clipboard history: Win+V lists what Windows has kept from your recent copies (text items);
+//! Clipboard history: Win+V lists what Windows has kept from your recent copies (text and pictures);
 //! click one, or pick it with the arrows and Enter, and it is pasted into the app you were in.
 
 use std::ffi::c_void;
@@ -75,13 +75,57 @@ fn remove(id: Option<String>, hwnd: isize) {
     });
 }
 
-/// The text items in Windows' clipboard history, newest first: (id, text). None = history is off.
+/// Thumbnails of the picture items, by history item id: (width, height, premultiplied BGRA).
+static THUMBS: Mutex<Vec<(String, u32, u32, Vec<u8>)>> = Mutex::new(Vec::new());
+pub fn thumb_sizes() -> Vec<(u32, u32)> {
+    THUMBS.lock().unwrap().iter().map(|t| (t.1, t.2)).collect()
+}
+const THUMB_W: u32 = 300;
+const THUMB_H: u32 = 48;
+
+/// The size a w x h picture is drawn at to fit max_w x max_h, keeping its shape (never enlarged).
+pub fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (0, 0);
+    }
+    let k = (max_w as f64 / w as f64).min(max_h as f64 / h as f64).min(1.0);
+    (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
+}
+
+/// Decode a clipboard picture (a WinRT stream) into a small premultiplied thumbnail.
+fn thumbnail(view: &windows::ApplicationModel::DataTransfer::DataPackageView) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::*;
+    unsafe {
+        let r = view.GetBitmapAsync().ok()?.get().ok()?;
+        let ras = r.OpenReadAsync().ok()?.get().ok()?;
+        let stream: IStream = windows::Win32::System::WinRT::CreateStreamOverRandomAccessStream(&ras).ok()?;
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let dec = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = dec.GetFrame(0).ok()?;
+        let (mut w, mut h) = (0u32, 0u32);
+        frame.GetSize(&mut w, &mut h).ok()?;
+        let (tw, th) = fit(w, h, THUMB_W, THUMB_H);
+        let sc = wic.CreateBitmapScaler().ok()?;
+        sc.Initialize(&frame, tw, th, WICBitmapInterpolationModeFant).ok()?;
+        let conv = wic.CreateFormatConverter().ok()?;
+        conv.Initialize(&sc, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
+        let mut px = vec![0u8; (tw * th * 4) as usize];
+        conv.CopyPixels(std::ptr::null(), tw * 4, &mut px).ok()?;
+        Some((tw, th, px))
+    }
+}
+
+/// The text and picture items in Windows' clipboard history, newest first: (id, text - empty for a
+/// picture, whose thumbnail goes to THUMBS). None = history is off.
 pub fn history() -> Option<Vec<(String, String)>> {
     if !Clipboard::IsHistoryEnabled().unwrap_or(false) {
         return None;
     }
     let mut out = Vec::new();
     let text_format = StandardDataFormats::Text().unwrap_or_default();
+    let bitmap_format = StandardDataFormats::Bitmap().unwrap_or_default();
+    let mut thumbs = Vec::new();
     if let Ok(items) = Clipboard::GetHistoryItemsAsync().and_then(|a| a.get()).and_then(|r| r.Items()) {
         for it in items {
             let (Ok(id), Ok(view)) = (it.Id(), it.Content()) else { continue };
@@ -89,9 +133,16 @@ pub fn history() -> Option<Vec<(String, String)>> {
                 if let Ok(t) = view.GetTextAsync().and_then(|a| a.get()) {
                     out.push((id.to_string(), t.to_string()));
                 }
+            } else if view.Contains(&bitmap_format).unwrap_or(false) {
+                // a copied picture: shown as its thumbnail
+                if let Some((w, h, px)) = thumbnail(&view) {
+                    thumbs.push((id.to_string(), w, h, px));
+                    out.push((id.to_string(), String::new()));
+                }
             }
         }
     }
+    *THUMBS.lock().unwrap() = thumbs;
     Some(out)
 }
 
@@ -402,7 +453,17 @@ unsafe fn draw(dc: HDC, rc: &RECT, s: f32, st: &State) -> windows::core::Result<
         if i == st.sel {
             rt.FillRoundedRectangle(&rrect(rect(PAD, y + 18.0, PAD + 3.0, y + ROW - 18.0), 1.5), &b(0x4CC2FF)?);
         }
-        txt(&preview(text, 110), &body, rect(PAD + 12.0, y + 10.0, w - PAD - 40.0, y + ROW - 10.0), 0xFFFFFF)?;
+        let id = &st.items[i].0;
+        let thumb = THUMBS.lock().unwrap().iter().find(|t| &t.0 == id).map(|t| (t.1, t.2, t.3.clone()));
+        if let Some((tw, th, px)) = thumb {
+            let props = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
+            if let Ok(bmp) = rt.CreateBitmap(D2D_SIZE_U { width: tw, height: th }, Some(px.as_ptr() as *const c_void), tw * 4, &props) {
+                let top = y + (ROW - th as f32) / 2.0;
+                rt.DrawBitmap(&bmp, Some(&rect(PAD + 12.0, top, PAD + 12.0 + tw as f32, top + th as f32)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            }
+        } else {
+            txt(&preview(text, 110), &body, rect(PAD + 12.0, y + 10.0, w - PAD - 40.0, y + ROW - 10.0), 0xFFFFFF)?;
+        }
         if st.hover == Some(i) {
             let x = font(12.0, DWRITE_FONT_WEIGHT_NORMAL)?;
             x.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
@@ -416,6 +477,14 @@ unsafe fn draw(dc: HDC, rc: &RECT, s: f32, st: &State) -> windows::core::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn picture_fit() {
+        assert_eq!(fit(1920, 1080, 300, 48), (85, 48));
+        assert_eq!(fit(3000, 100, 300, 48), (300, 10));
+        assert_eq!(fit(20, 10, 300, 48), (20, 10)); // small pictures are not enlarged
+        assert_eq!(fit(0, 10, 300, 48), (0, 0));
+    }
+
     #[test]
     fn previews_and_rows() {
         assert_eq!(preview("a\n  b\tc", 20), "a b c");

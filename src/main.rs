@@ -271,7 +271,7 @@ fn main() -> windows::core::Result<()> {
                 let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); // Windows' clipboard only answers single-threaded callers
                 let report = match clip::history() {
                     None => format!("clipboard history is off (Windows says: {:?})", windows::ApplicationModel::DataTransfer::Clipboard::IsHistoryEnabled()),
-                    Some(v) => format!("{} text items, lengths: {:?}", v.len(), v.iter().map(|i| i.1.chars().count()).collect::<Vec<_>>()),
+                    Some(v) => format!("{} items ({} pictures), text lengths: {:?}, picture thumbnails: {:?}", v.len(), clip::thumb_sizes().len(), v.iter().map(|i| i.1.chars().count()).collect::<Vec<_>>(), clip::thumb_sizes()),
                 };
                 let _ = std::fs::write(args.get(2).map(String::as_str).unwrap_or("clip-selftest.txt"), report);
                 return Ok(());
