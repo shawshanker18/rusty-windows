@@ -204,6 +204,9 @@ const REPLACE: usize = 34;
 const REPLACE_ONE: usize = 35;
 const REPLACE_ALL: usize = 36;
 const GOTO: usize = 37;
+const CLOSE_TAB: usize = 40;
+const NEXT_TAB: usize = 41;
+const PREV_TAB: usize = 42;
 const ROW2: f32 = 38.0; // the replace row under the find row
 const FIND_H: f32 = 44.0; // the find bar, between the menu row and the text
 const FIND_W: f32 = 260.0; // its text field
@@ -214,7 +217,9 @@ enum Hit {
     Min,
     Max,
     Close,
-    TabClose,
+    Tab(usize),
+    TabClose(usize),
+    NewTab,
     FindNext,
     FindPrev,
     FindClose,
@@ -222,7 +227,20 @@ enum Hit {
     ReplaceAll,
 }
 
+/// A tab that is not on screen: its document and where the caret was.
+#[derive(Clone, Default)]
+struct Doc {
+    path: Option<String>,
+    eol: Eol,
+    enc: Enc,
+    dirty: bool,
+    text: Vec<u16>,
+    sel: (u32, u32),
+}
+
 struct State {
+    tabs: Vec<Doc>, // every tab; the one at `cur` is live in the fields below and the edit control
+    cur: usize,
     edit: HWND,
     find: HWND,       // the find bar's text field (hidden until Ctrl+F)
     repl: HWND,       // the "replace with" field (Ctrl+H)
@@ -403,6 +421,23 @@ unsafe fn set_document(text: &str, path: Option<String>, eol: Eol, enc: Enc) {
     });
 }
 
+/// Open a file in its own tab - or bring its tab forward when it is already open.
+unsafe fn open_file(hwnd: HWND, path: &str) {
+    let same = |p: &Option<String>| p.as_deref().is_some_and(|q| q.eq_ignore_ascii_case(path));
+    let found = ST.with(|st| st.borrow().as_ref().and_then(|s| if same(&s.path) { Some(s.cur) } else { s.tabs.iter().position(|d| same(&d.path)) }));
+    if let Some(i) = found {
+        let cur = ST.with(|st| st.borrow().as_ref().map(|s| s.cur)).unwrap_or(0);
+        if i != cur {
+            switch_tab(hwnd, i);
+        }
+        return;
+    }
+    if !blank_live() {
+        new_tab(hwnd);
+    }
+    load(hwnd, path);
+}
+
 /// Load `path` into the window. An unreadable file leaves everything as it was.
 unsafe fn load(hwnd: HWND, path: &str) {
     let Ok(bytes) = std::fs::read(path) else {
@@ -471,23 +506,184 @@ unsafe fn may_discard(hwnd: HWND) -> bool {
     }
 }
 
+/// Tab x position: tabs side by side from 48 px, each TAB_W wide (narrower when many).
+fn tab_w(n: usize, w: f32) -> f32 {
+    TAB_W.min(((w - 48.0 - 190.0) / n.max(1) as f32).max(80.0))
+}
+fn tab_rect(i: usize, n: usize, w: f32) -> D2D_RECT_F {
+    let tw = tab_w(n, w);
+    rect(48.0 + i as f32 * tw, 10.0, 48.0 + (i + 1) as f32 * tw - 2.0, TABS + 4.0)
+}
+
+/// Move the live document into its tab slot and put tab `to` on screen.
+unsafe fn switch_tab(hwnd: HWND, to: usize) {
+    let Some(edit) = ST.with(|st| st.borrow().as_ref().map(|s| s.edit)) else { return };
+    let mut sel = (0u32, 0u32);
+    SendMessageW(edit, EM_GETSEL, Some(WPARAM(&mut sel.0 as *mut _ as usize)), Some(LPARAM(&mut sel.1 as *mut _ as isize)));
+    let text = edit_text(edit);
+    let next = ST.with(|st| {
+        let mut st = st.borrow_mut();
+        let st = st.as_mut()?;
+        let cur = st.cur;
+        st.tabs[cur] = Doc { path: st.path.clone(), eol: st.eol, enc: st.enc, dirty: st.dirty, text, sel };
+        let to = to.min(st.tabs.len() - 1);
+        st.cur = to;
+        Some(st.tabs[to].clone())
+    });
+    let Some(d) = next else { return };
+    let _ = SetWindowTextW(edit, &HSTRING::from_wide(&d.text));
+    ST.with(|st| {
+        if let Some(st) = st.borrow_mut().as_mut() {
+            (st.path, st.eol, st.enc, st.dirty) = (d.path, d.eol, d.enc, d.dirty);
+        }
+    });
+    SendMessageW(edit, EM_SETSEL, Some(WPARAM(d.sel.0 as usize)), Some(LPARAM(d.sel.1 as isize)));
+    SendMessageW(edit, EM_SCROLLCARET, None, None);
+    refresh_position();
+    retitle(hwnd);
+    let _ = SetFocus(Some(edit));
+}
+
+/// A new empty tab after the others, on screen.
+unsafe fn new_tab(hwnd: HWND) {
+    let n = ST.with(|st| st.borrow_mut().as_mut().map(|s| { s.tabs.push(Doc::default()); s.tabs.len() - 1 }));
+    if let Some(n) = n {
+        switch_tab(hwnd, n);
+    }
+}
+
+/// Close tab `i` (asking about unsaved changes first); the last tab closes the window.
+unsafe fn close_tab(hwnd: HWND, i: usize) {
+    let (cur, n) = ST.with(|st| st.borrow().as_ref().map(|s| (s.cur, s.tabs.len()))).unwrap_or((0, 1));
+    if i != cur {
+        switch_tab(hwnd, i);
+    }
+    if !may_discard(hwnd) {
+        return;
+    }
+    if n == 1 {
+        set_document("", None, Eol::Crlf, Enc::Utf8);
+        let _ = DestroyWindow(hwnd);
+        return;
+    }
+    ST.with(|st| {
+        if let Some(st) = st.borrow_mut().as_mut() {
+            st.tabs.remove(i);
+            st.cur = usize::MAX; // nothing live to stash
+        }
+    });
+    let to = i.min(n - 2);
+    show_tab(hwnd, to);
+}
+
+/// Put tab `to` on screen without stashing the live one (it was just removed).
+unsafe fn show_tab(hwnd: HWND, to: usize) {
+    let Some((edit, d)) = ST.with(|st| st.borrow_mut().as_mut().map(|s| { s.cur = to; (s.edit, s.tabs[to].clone()) })) else { return };
+    let _ = SetWindowTextW(edit, &HSTRING::from_wide(&d.text));
+    ST.with(|st| {
+        if let Some(st) = st.borrow_mut().as_mut() {
+            (st.path, st.eol, st.enc, st.dirty) = (d.path, d.eol, d.enc, d.dirty);
+        }
+    });
+    SendMessageW(edit, EM_SETSEL, Some(WPARAM(d.sel.0 as usize)), Some(LPARAM(d.sel.1 as isize)));
+    refresh_position();
+    retitle(hwnd);
+}
+
+fn session_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("shellbits").join("notepad-tabs")
+}
+
+/// One line per tab: "<1 if unsaved>\t<path or empty>"; the active tab's index on the first line.
+pub fn session_text(cur: usize, tabs: &[(Option<String>, bool)]) -> String {
+    let mut s = format!("{cur}\n");
+    for (p, dirty) in tabs {
+        s += &format!("{}\t{}\n", if *dirty { 1 } else { 0 }, p.as_deref().unwrap_or(""));
+    }
+    s
+}
+pub fn parse_session(s: &str) -> (usize, Vec<(Option<String>, bool)>) {
+    let mut lines = s.lines();
+    let cur = lines.next().and_then(|l| l.trim().parse().ok()).unwrap_or(0);
+    let tabs = lines.filter_map(|l| l.split_once('\t')).map(|(d, p)| ((!p.is_empty()).then(|| p.to_string()), d == "1")).collect();
+    (cur, tabs)
+}
+
+/// Like Windows 11 Notepad: closing keeps every tab, unsaved text included, for next time.
+unsafe fn save_session(hwnd: HWND) {
+    if ST.with(|st| st.borrow().as_ref().map(|s| s.cur)) == Some(usize::MAX) {
+        return;
+    }
+    let cur = ST.with(|st| st.borrow().as_ref().map(|s| s.cur)).unwrap_or(0);
+    switch_tab(hwnd, cur); // stash the live tab
+    let Some((cur, tabs)) = ST.with(|st| st.borrow().as_ref().map(|s| (s.cur, s.tabs.clone()))) else { return };
+    let dir = session_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    for (i, d) in tabs.iter().enumerate() {
+        if d.dirty || d.path.is_none() {
+            let _ = std::fs::write(dir.join(format!("{i}.txt")), String::from_utf16_lossy(&d.text));
+        }
+    }
+    let list: Vec<(Option<String>, bool)> = tabs.iter().map(|d| (d.path.clone(), d.dirty)).collect();
+    let _ = std::fs::write(dir.join("session.txt"), session_text(cur, &list));
+}
+
+unsafe fn restore_session(hwnd: HWND) {
+    let dir = session_dir();
+    let Ok(t) = std::fs::read_to_string(dir.join("session.txt")) else { return };
+    let (cur, list) = parse_session(&t);
+    let mut tabs = Vec::new();
+    for (i, (path, dirty)) in list.into_iter().enumerate() {
+        let stash = std::fs::read_to_string(dir.join(format!("{i}.txt"))).ok();
+        let (text, enc, eol) = match (&path, stash) {
+            (_, Some(t)) if dirty || path.is_none() => (t, Enc::Utf8, Eol::Crlf),
+            (Some(p), _) => match std::fs::read(p) {
+                Ok(b) => { let (t, e) = decode(&b); let eol = eol_of(&t); (with_eol(&t, Eol::Crlf), e, eol) }
+                Err(_) => continue, // the file is gone
+            },
+            _ => continue,
+        };
+        // an empty untitled tab is not worth keeping
+        if path.is_none() && text.is_empty() {
+            continue;
+        }
+        tabs.push(Doc { path, eol, enc, dirty, text: text.encode_utf16().collect(), sel: (0, 0) });
+    }
+    if tabs.is_empty() {
+        return;
+    }
+    let to = cur.min(tabs.len() - 1);
+    ST.with(|st| {
+        if let Some(st) = st.borrow_mut().as_mut() {
+            st.tabs = tabs;
+        }
+    });
+    show_tab(hwnd, to);
+}
+
+/// The live tab is an untouched, empty Untitled one (a file opened then takes its place).
+fn blank_live() -> bool {
+    ST.with(|st| st.borrow().as_ref().is_some_and(|s| s.path.is_none() && !s.dirty && unsafe { GetWindowTextLengthW(s.edit) } == 0))
+}
+
 unsafe fn command(hwnd: HWND, id: usize) {
     let edit = ST.with(|st| st.borrow().as_ref().map(|s| s.edit)).unwrap_or_default();
     let to_edit = |m: u32, w: usize, l: isize| _ = SendMessageW(edit, m, Some(WPARAM(w)), Some(LPARAM(l)));
     match id {
-        NEW => {
-            if may_discard(hwnd) {
-                set_document("", None, Eol::Crlf, Enc::Utf8);
-                refresh_position();
-                retitle(hwnd);
+        NEW => new_tab(hwnd),
+        OPEN => {
+            if let Some(p) = pick(hwnd, false, "") {
+                open_file(hwnd, &p);
             }
         }
-        OPEN => {
-            if may_discard(hwnd) {
-                if let Some(p) = pick(hwnd, false, "") {
-                    load(hwnd, &p);
-                }
-            }
+        CLOSE_TAB => {
+            let cur = ST.with(|st| st.borrow().as_ref().map(|s| s.cur)).unwrap_or(0);
+            close_tab(hwnd, cur);
+        }
+        NEXT_TAB | PREV_TAB => {
+            let (cur, n) = ST.with(|st| st.borrow().as_ref().map(|s| (s.cur, s.tabs.len()))).unwrap_or((0, 1));
+            switch_tab(hwnd, if id == NEXT_TAB { (cur + 1) % n } else { (cur + n - 1) % n });
         }
         SAVE => _ = save(hwnd, false),
         SAVE_AS => _ = save(hwnd, true),
@@ -566,7 +762,7 @@ unsafe fn open_menu(hwnd: HWND, which: usize) {
     let s = GetDpiForWindow(hwnd) as f32 / 96.0;
     let (status, wrap) = ST.with(|st| st.borrow().as_ref().map(|s| (s.status, s.wrap))).unwrap_or((true, true));
     let items: &[(&str, usize)] = match which {
-        0 => &[("New\tCtrl+N", NEW), ("Open\tCtrl+O", OPEN), ("Save\tCtrl+S", SAVE), ("Save as\tCtrl+Shift+S", SAVE_AS), ("", 0), ("Exit", EXIT)],
+        0 => &[("New tab\tCtrl+N", NEW), ("Open\tCtrl+O", OPEN), ("Save\tCtrl+S", SAVE), ("Save as\tCtrl+Shift+S", SAVE_AS), ("", 0), ("Close tab\tCtrl+W", CLOSE_TAB), ("Exit", EXIT)],
         1 => &[("Undo\tCtrl+Z", UNDO), ("", 0), ("Cut\tCtrl+X", CUT), ("Copy\tCtrl+C", COPY), ("Paste\tCtrl+V", PASTE), ("Delete\tDel", DELETE), ("", 0), ("Find\tCtrl+F", FIND), ("Find next\tF3", FIND_NEXT), ("Find previous\tShift+F3", FIND_PREV), ("Replace\tCtrl+H", REPLACE), ("Go to\tCtrl+G", GOTO), ("", 0), ("Select all\tCtrl+A", SELECT_ALL)],
         _ => &[("Zoom in\tCtrl+Plus", ZOOM_IN), ("Zoom out\tCtrl+Minus", ZOOM_OUT), ("Restore default zoom\tCtrl+0", ZOOM_RESET), ("", 0), ("Word wrap", WRAP), ("Status bar", STATUS_BAR)],
     };
@@ -588,7 +784,7 @@ unsafe fn open_menu(hwnd: HWND, which: usize) {
     }
 }
 
-fn hit(x: f32, y: f32, w: f32, finding: bool) -> Option<Hit> {
+fn hit(x: f32, y: f32, w: f32, finding: bool, n: usize) -> Option<Hit> {
     if finding {
         let inside = |r: D2D_RECT_F| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
         if let Some(k) = (0..3).find(|k| inside(find_button(w, *k))) {
@@ -602,8 +798,17 @@ fn hit(x: f32, y: f32, w: f32, finding: bool) -> Option<Hit> {
     if y < 32.0 && x >= w - 138.0 {
         return Some([Hit::Min, Hit::Max, Hit::Close][(((x - (w - 138.0)) / 46.0) as usize).min(2)]);
     }
-    if (14.0..38.0).contains(&y) && (48.0 + TAB_W - 32.0..48.0 + TAB_W - 6.0).contains(&x) {
-        return Some(Hit::TabClose);
+    if (10.0..TABS).contains(&y) && x >= 48.0 {
+        let tw = tab_w(n, w);
+        let i = ((x - 48.0) / tw) as usize;
+        if i < n {
+            let r = tab_rect(i, n, w);
+            return Some(if x >= r.right - 32.0 && x < r.right - 6.0 && (14.0..38.0).contains(&y) { Hit::TabClose(i) } else { Hit::Tab(i) });
+        }
+        let plus = 48.0 + n as f32 * tw;
+        if x >= plus + 4.0 && x < plus + 40.0 {
+            return Some(Hit::NewTab);
+        }
     }
     if (TABS..TABS + MENU).contains(&y) {
         return MENUS.iter().position(|m| x >= m.1 && x < m.2).map(Hit::Menu);
@@ -635,18 +840,33 @@ unsafe fn draw(st: &State, w: f32, h: f32, maximized: bool) -> windows::core::Re
     if let Some(i) = icon {
         rt.DrawBitmap(i, Some(&rect(16.0, 16.0, 32.0, 32.0)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
     }
-    let tab = rect(48.0, 10.0, 48.0 + TAB_W, TABS + 4.0);
-    rt.FillRoundedRectangle(&rrect(tab, 6.0), &b(0x1F1F1F)?);
-    text(&name(&st.path), &small, rect(tab.left + 12.0, 10.0, tab.right - 36.0, TABS), &white);
-    if st.hover == Some(Hit::TabClose) {
-        rt.FillRoundedRectangle(&rrect(rect(tab.right - 32.0, 14.0, tab.right - 6.0, 38.0), 4.0), &b(0x2D2D2D)?);
+    // one tab per document: the live one raised, the others flat (lighter under the mouse)
+    let n = st.tabs.len();
+    for k in 0..n {
+        let tab = tab_rect(k, n, w);
+        let live = k == st.cur;
+        let (path, dirty) = if live { (st.path.clone(), st.dirty) } else { (st.tabs[k].path.clone(), st.tabs[k].dirty) };
+        if live {
+            rt.FillRoundedRectangle(&rrect(tab, 6.0), &b(0x1F1F1F)?);
+        } else if st.hover == Some(Hit::Tab(k)) || st.hover == Some(Hit::TabClose(k)) {
+            rt.FillRoundedRectangle(&rrect(rect(tab.left, tab.top, tab.right, TABS - 4.0), 6.0), &b(0x1A1A1A)?);
+        }
+        text(&name(&path), &small, rect(tab.left + 12.0, 10.0, tab.right - 36.0, TABS), if live { &white } else { &dim });
+        let x_box = rect(tab.right - 32.0, 14.0, tab.right - 6.0, 38.0);
+        if st.hover == Some(Hit::TabClose(k)) {
+            rt.FillRoundedRectangle(&rrect(x_box, 4.0), &b(0x2D2D2D)?);
+        }
+        if dirty && st.hover != Some(Hit::TabClose(k)) {
+            rt.FillEllipse(&D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: tab.right - 19.0, Y: 26.0 }, radiusX: 3.0, radiusY: 3.0 }, &dim); // unsaved changes
+        } else if live || st.hover == Some(Hit::Tab(k)) || st.hover == Some(Hit::TabClose(k)) {
+            ico(0xE8BB, &icon8, x_box, &white);
+        }
     }
-    if st.dirty && st.hover != Some(Hit::TabClose) {
-        rt.FillEllipse(&D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: tab.right - 19.0, Y: 26.0 }, radiusX: 3.0, radiusY: 3.0 }, &dim); // unsaved changes
-    } else {
-        ico(0xE8BB, &icon8, rect(tab.right - 32.0, 14.0, tab.right - 6.0, 38.0), &white);
+    let plus = 48.0 + n as f32 * tab_w(n, w);
+    if st.hover == Some(Hit::NewTab) {
+        rt.FillRoundedRectangle(&rrect(rect(plus + 4.0, 12.0, plus + 40.0, TABS - 4.0), 4.0), &b(0x1F1F1F)?);
     }
-    ico(0xE710, &icon10, rect(tab.right + 6.0, 10.0, tab.right + 38.0, TABS), &dim);
+    ico(0xE710, &icon10, rect(plus + 6.0, 10.0, plus + 38.0, TABS), &dim);
     for (k, (cp, which)) in [(0xE921u32, Hit::Min), (if maximized { 0xE923 } else { 0xE922 }, Hit::Max), (0xE8BB, Hit::Close)].into_iter().enumerate() {
         let r = rect(w - 138.0 + k as f32 * 46.0, 0.0, w - 92.0 + k as f32 * 46.0, 32.0);
         if st.hover == Some(which) {
@@ -782,7 +1002,10 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             (b'F', false) => FIND,
             (b'H', false) => REPLACE,
             (b'G', false) => GOTO,
-            (b'N', false) => NEW,
+            (b'N', false) | (b'T', false) => NEW,
+            (b'W', false) => CLOSE_TAB,
+            (0x09, false) => NEXT_TAB,
+            (0x09, true) => PREV_TAB,
             (b'O', false) => OPEN,
             (b'S', false) => SAVE,
             (b'S', true) => SAVE_AS,
@@ -796,7 +1019,7 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             return LRESULT(0);
         }
     }
-    if msg == WM_CHAR && GetKeyState(VK_CONTROL.0 as i32) < 0 && matches!(wp.0, 14 | 15 | 19) {
+    if msg == WM_CHAR && GetKeyState(VK_CONTROL.0 as i32) < 0 && matches!(wp.0, 14 | 15 | 19 | 20 | 23) {
         return LRESULT(0); // the control characters of Ctrl+N / O / S: no beep, nothing typed
     }
     if msg == WM_CHAR && GetKeyState(VK_CONTROL.0 as i32) < 0 && matches!(wp.0, 6 | 7 | 8) {
@@ -810,8 +1033,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     let at = |lp: LPARAM| {
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
-        let finding = ST.with(|st| st.borrow().as_ref().is_some_and(|s| s.finding));
-        hit((lp.0 & 0xFFFF) as i16 as f32 / s, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s, rc.right as f32 / s, finding)
+        let (finding, n) = ST.with(|st| st.borrow().as_ref().map(|s| (s.finding, s.tabs.len()))).unwrap_or((false, 1));
+        hit((lp.0 & 0xFFFF) as i16 as f32 / s, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s, rc.right as f32 / s, finding, n)
     };
     match msg {
         WM_NCCALCSIZE if wp.0 == 1 => {
@@ -831,7 +1054,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = GetClientRect(hwnd, &mut rc);
             let e = (6.0 * s) as i32;
             let (l, t, r, bt) = (pt.x < e, pt.y < e, pt.x >= rc.right - e, pt.y >= rc.bottom - e);
-            let on_button = hit(pt.x as f32 / s, pt.y as f32 / s, rc.right as f32 / s, false).is_some();
+            let n = ST.with(|st| st.try_borrow().ok().and_then(|s| s.as_ref().map(|s| s.tabs.len()))).unwrap_or(1);
+            let on_button = hit(pt.x as f32 / s, pt.y as f32 / s, rc.right as f32 / s, false, n).is_some();
             let code = match (IsZoomed(hwnd).as_bool(), l, t, r, bt) {
                 (false, true, true, _, _) => HTTOPLEFT,
                 (false, _, true, true, _) => HTTOPRIGHT,
@@ -940,7 +1164,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             Some(Hit::Menu(i)) => open_menu(hwnd, i),
             Some(Hit::Min) => _ = ShowWindow(hwnd, SW_MINIMIZE),
             Some(Hit::Max) => _ = ShowWindow(hwnd, if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE }),
-            Some(Hit::Close | Hit::TabClose) => _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)),
+            Some(Hit::Close) => _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)),
+            Some(Hit::Tab(i)) => {
+                if ST.with(|st| st.borrow().as_ref().is_some_and(|s| s.cur != i)) {
+                    switch_tab(hwnd, i);
+                }
+            }
+            Some(Hit::TabClose(i)) => close_tab(hwnd, i),
+            Some(Hit::NewTab) => new_tab(hwnd),
             Some(Hit::FindNext) => command(hwnd, FIND_NEXT),
             Some(Hit::FindPrev) => command(hwnd, FIND_PREV),
             Some(Hit::FindClose) => command(hwnd, FIND_CLOSE),
@@ -949,9 +1180,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             None => {}
         },
         WM_CLOSE => {
-            if may_discard(hwnd) {
-                let _ = DestroyWindow(hwnd);
-            }
+            // like Windows 11 Notepad: no questions, every tab comes back next time
+            save_session(hwnd);
+            let _ = DestroyWindow(hwnd);
         }
         WM_DESTROY => {
             WIN.store(0, Relaxed);
@@ -1015,7 +1246,7 @@ pub unsafe fn show(inst: HINSTANCE, path: Option<String>) {
         let repl = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), w!(""), WS_CHILD | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 0, 0, 10, 10, Some(h), None, Some(inst), None).unwrap_or_default();
         SendMessageW(repl, WM_SETFONT, Some(WPARAM(GetStockObject(DEFAULT_GUI_FONT).0 as usize)), Some(LPARAM(1)));
         let _ = SetWindowSubclass(repl, Some(edit_proc), 3, 0);
-        ST.with(|st| *st.borrow_mut() = Some(State { edit, find, repl, mode: 0, note: String::new(), finding: false, find_miss: false, font: HFONT::default(), bg: CreateSolidBrush(COLORREF(0x272727)), path: None, eol: Eol::Crlf, enc: Enc::Utf8, dirty: false, zoom, status, wrap, hover: None, pos: (1, 1, 0), gfx: None }));
+        ST.with(|st| *st.borrow_mut() = Some(State { tabs: vec![Doc::default()], cur: 0, edit, find, repl, mode: 0, note: String::new(), finding: false, find_miss: false, font: HFONT::default(), bg: CreateSolidBrush(COLORREF(0x272727)), path: None, eol: Eol::Crlf, enc: Enc::Utf8, dirty: false, zoom, status, wrap, hover: None, pos: (1, 1, 0), gfx: None }));
         WIN.store(h.0 as isize, Relaxed);
         let dark = 1u32;
         let _ = DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
@@ -1024,13 +1255,12 @@ pub unsafe fn show(inst: HINSTANCE, path: Option<String>) {
         set_font(h);
         arrange(h);
         SetTimer(Some(h), 1, 200, None);
+        restore_session(h);
     }
     let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
     crate::flyout::force_foreground(h);
     if let Some(p) = path {
-        if may_discard(h) {
-            load(h, &p);
-        }
+        open_file(h, &p);
     }
 }
 
@@ -1068,15 +1298,19 @@ mod tests {
     }
     #[test]
     fn hits() {
-        assert_eq!(hit(20.0, 58.0, 1140.0, false), Some(Hit::Menu(0)));
-        assert_eq!(hit(120.0, 58.0, 1140.0, false), Some(Hit::Menu(2)));
-        assert_eq!(hit(1120.0, 10.0, 1140.0, false), Some(Hit::Close));
-        assert_eq!(hit(48.0 + TAB_W - 20.0, 26.0, 1140.0, false), Some(Hit::TabClose));
-        assert_eq!(hit(500.0, 20.0, 1140.0, false), None); // empty title bar: drags the window
+        assert_eq!(hit(20.0, 58.0, 1140.0, false, 1), Some(Hit::Menu(0)));
+        assert_eq!(hit(120.0, 58.0, 1140.0, false, 1), Some(Hit::Menu(2)));
+        assert_eq!(hit(1120.0, 10.0, 1140.0, false, 1), Some(Hit::Close));
+        assert_eq!(hit(48.0 + TAB_W - 20.0, 26.0, 1140.0, false, 1), Some(Hit::TabClose(0)));
+        assert_eq!(hit(48.0 + TAB_W + 20.0, 26.0, 1140.0, false, 1), Some(Hit::NewTab));
+        assert_eq!(hit(48.0 + TAB_W + 20.0, 26.0, 1140.0, false, 2), Some(Hit::Tab(1)));
+        let tabs = vec![(Some(r"C:\a b.txt".to_string()), false), (None, true)];
+        assert_eq!(parse_session(&session_text(1, &tabs)), (1, tabs));
+        assert_eq!(hit(500.0, 20.0, 1140.0, false, 1), None); // empty title bar: drags the window
         // the find bar's buttons only exist while it is open
-        assert_eq!(hit(1140.0 - 100.0, TABS + MENU + 20.0, 1140.0, true), Some(Hit::FindNext));
-        assert_eq!(hit(1140.0 - 30.0, TABS + MENU + 20.0, 1140.0, true), Some(Hit::FindClose));
-        assert_eq!(hit(1140.0 - 100.0, TABS + MENU + 20.0, 1140.0, false), None);
+        assert_eq!(hit(1140.0 - 100.0, TABS + MENU + 20.0, 1140.0, true, 1), Some(Hit::FindNext));
+        assert_eq!(hit(1140.0 - 30.0, TABS + MENU + 20.0, 1140.0, true, 1), Some(Hit::FindClose));
+        assert_eq!(hit(1140.0 - 100.0, TABS + MENU + 20.0, 1140.0, false, 1), None);
     }
     #[test]
     fn replacing_and_lines() {
