@@ -417,6 +417,32 @@ fn context_parts(folder: &str) -> (f64, f64) {
     r
 }
 
+/// MCP servers Claude Code would start for a folder, from ~/.claude.json: the global ones and the
+/// folder's own (by path, either slash), as (name, kind). Only names and kinds are read.
+pub fn connectors(config: &serde_json::Value, folder: &str) -> Vec<(String, String)> {
+    let kind = |v: &serde_json::Value| v.get("type").and_then(|t| t.as_str()).unwrap_or("stdio").to_string();
+    let mut v: Vec<(String, String)> = Vec::new();
+    let norm = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let want = norm(folder);
+    let project = config.get("projects").and_then(|p| p.as_object()).and_then(|p| p.iter().find(|(k, _)| norm(k) == want)).map(|(_, v)| v);
+    for m in [config.get("mcpServers"), project.and_then(|p| p.get("mcpServers"))].into_iter().flatten() {
+        if let Some(m) = m.as_object() {
+            for (name, s) in m {
+                if !v.iter().any(|x| &x.0 == name) {
+                    v.push((name.clone(), kind(s)));
+                }
+            }
+        }
+    }
+    v
+}
+
+fn folder_connectors(folder: &str) -> Vec<(String, String)> {
+    let f = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude.json");
+    let cfg: serde_json::Value = std::fs::read_to_string(f).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    connectors(&cfg, folder)
+}
+
 pub fn tokens(n: f64) -> String {
     let short = |v: f64, unit: &str| {
         let t = format!("{v:.1}");
@@ -1899,6 +1925,31 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         }
         py += 14.0;
 
+        // Connectors: the MCP servers this folder's sessions get (read when the folder changes)
+        {
+            static CONN: Mutex<Option<(String, Vec<(String, String)>)>> = Mutex::new(None);
+            let mut c = CONN.lock().unwrap();
+            if c.as_ref().map(|x| &x.0) != Some(&set.folder) {
+                *c = Some((set.folder.clone(), folder_connectors(&set.folder)));
+            }
+            let list = c.as_ref().map(|x| x.1.clone()).unwrap_or_default();
+            drop(c);
+            rt.FillRectangle(&rect(x + 16.0, py, cw - 16.0, py + 1.0), &b(C_LINE)?);
+            txt("Connectors", &g.small, rect(x + 17.0, py + 12.0, cw - 16.0, py + 34.0), &white);
+            py += 40.0;
+            if list.is_empty() {
+                txt("None set up for this folder", &g.small, rect(x + 17.0, py, cw - 16.0, py + 24.0), &soft);
+                py += 24.0;
+            }
+            for (name, kind) in &list {
+                lucide(rt, "server", rect(x + 14.0, py, x + 32.0, py + 24.0), 14.0, &soft);
+                txt(name, &g.small, rect(x + 41.0, py, cw - 90.0, py + 24.0), &white);
+                txt(kind, &g.small, rect(cw - 16.0 - measure(g, kind) - 2.0, py, cw - 8.0, py + 24.0), &soft);
+                py += 24.0;
+            }
+            py += 14.0;
+        }
+
         // Outputs: the files this session wrote, newest first
         // ...those inside the session's own folder (scratch files elsewhere are not its outputs)
         let home = set.folder.replace('/', "\\").to_lowercase();
@@ -3114,6 +3165,13 @@ mod tests {
         // estimates never exceed what is in use
         let small = super::breakdown(1_000.0, 200_000.0, 5_000.0, 5_000.0);
         assert_eq!((small[0].2, small[1].2, small[2].2), (1_000.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn connectors_global_then_folder() {
+        let cfg = serde_json::json!({"mcpServers": {"a": {"command": "x"}}, "projects": {"C:/Work/app": {"mcpServers": {"kaggle": {"type": "http"}, "a": {}}}}});
+        assert_eq!(super::connectors(&cfg, r"C:\work\app\"), vec![("a".to_string(), "stdio".to_string()), ("kaggle".to_string(), "http".to_string())]);
+        assert_eq!(super::connectors(&cfg, "D:/other").len(), 1);
     }
 
     #[test]
