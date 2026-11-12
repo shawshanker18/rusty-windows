@@ -2117,7 +2117,89 @@ unsafe fn place_edit(hwnd: HWND) {
 
 static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
 
+/// The commands the slash menu offers: Claude Code's own, then the user's skills and commands.
+pub fn slash_commands(skills: &[String], commands: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = ["compact", "clear", "context", "cost", "init", "review", "security-review", "memory", "model"].iter().map(|s| s.to_string()).collect();
+    for n in skills.iter().chain(commands) {
+        if !v.contains(n) {
+            v.push(n.clone());
+        }
+    }
+    v
+}
+
+/// Names in ~/.claude/skills (folders) and ~/.claude/commands (*.md files).
+fn user_commands() -> (Vec<String>, Vec<String>) {
+    let home = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude");
+    let names = |dir: &str, md: bool| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(home.join(dir)).into_iter().flatten().flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if md { if p.extension()? == "md" { Some(p.file_stem()?.to_string_lossy().to_string()) } else { None } } else { p.is_dir().then(|| e.file_name().to_string_lossy().to_string()) }
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    (names("skills", false), names("commands", true))
+}
+
+/// Typing '/' into an empty box opens the command list, like the app; the pick goes into the box.
+unsafe fn slash_menu(edit: HWND) -> bool {
+    let (skills, cmds) = user_commands();
+    let list = slash_commands(&skills, &cmds);
+    let Ok(m) = CreatePopupMenu() else { return false };
+    for (k, n) in list.iter().enumerate() {
+        let _ = AppendMenuW(m, MF_STRING, k + 1, &windows::core::HSTRING::from(format!("/{n}")));
+    }
+    let mut r = RECT::default();
+    let _ = GetWindowRect(edit, &mut r);
+    let parent = GetParent(edit).unwrap_or(edit);
+    let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_BOTTOMALIGN, r.left, r.top - 4, None, parent, None).0;
+    let _ = DestroyMenu(m);
+    let text = if cmd > 0 { format!("/{} ", list[cmd as usize - 1]) } else { "/".to_string() };
+    let _ = SetWindowTextW(edit, &windows::core::HSTRING::from(text.as_str()));
+    let n = text.encode_utf16().count();
+    SendMessageW(edit, EM_SETSEL, Some(WPARAM(n)), Some(LPARAM(n as isize)));
+    true
+}
+
+unsafe fn picture_only() -> bool {
+    use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+    IsClipboardFormatAvailable(2).is_ok() && IsClipboardFormatAvailable(13).is_err()
+}
+
+/// Ctrl+V with a picture on the clipboard: save it as a PNG and mention it, so it is sent as an image.
+unsafe fn paste_picture(edit: HWND) -> bool {
+    use windows::Win32::System::DataExchange::*;
+    if IsClipboardFormatAvailable(2).is_err() || IsClipboardFormatAvailable(13).is_ok() {
+        return false; // no picture, or text is there too: normal paste
+    }
+    if OpenClipboard(Some(edit)).is_err() {
+        return false;
+    }
+    let bmp = GetClipboardData(2).map(|h| HBITMAP(h.0));
+    let t = windows::Win32::System::SystemInformation::GetLocalTime();
+    let path = std::env::temp_dir().join(format!("claude-paste-{:02}{:02}{:02}{:03}.png", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds));
+    let ok = bmp.is_ok_and(|b| crate::snip::save_png_at(b, &path).is_ok());
+    let _ = CloseClipboard();
+    if ok {
+        let mention = format!("@\"{}\" ", path.display());
+        SendMessageW(edit, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(windows::core::HSTRING::from(mention.as_str()).as_ptr() as isize)));
+    }
+    ok
+}
+
 unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_CHAR && wp.0 == '/' as usize && GetWindowTextLengthW(hwnd) == 0 && slash_menu(hwnd) {
+        return LRESULT(0);
+    }
+    if (msg == WM_PASTE || (msg == WM_KEYDOWN && wp.0 == 'V' as usize && GetKeyState(VK_CONTROL.0 as i32) < 0)) && paste_picture(hwnd) {
+        return LRESULT(0);
+    }
+    if msg == WM_CHAR && wp.0 == 0x16 && picture_only() {
+        return LRESULT(0); // the Ctrl+V character after a picture paste
+    }
     if msg == WM_KEYDOWN && wp.0 == VK_RETURN.0 as usize && GetKeyState(VK_SHIFT.0 as i32) >= 0 {
         submit(hwnd);
         return LRESULT(0);
@@ -2740,6 +2822,14 @@ pub unsafe fn snapshot(path: &str) -> windows::core::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slash_list_has_builtins_then_user_ones_once() {
+        let v = super::slash_commands(&["ponytail".into(), "compact".into()], &["deploy".into()]);
+        assert_eq!(v[0], "compact");
+        assert_eq!(v.iter().filter(|n| *n == "compact").count(), 1);
+        assert!(v.ends_with(&["ponytail".to_string(), "deploy".to_string()]));
+    }
+
     use super::*;
     use serde_json::json;
 

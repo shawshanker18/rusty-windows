@@ -151,7 +151,11 @@ unsafe fn save_png(piece: HBITMAP) -> Result<()> {
     let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Pictures").join("Screenshots");
     let _ = std::fs::create_dir_all(&dir);
     let t = windows::Win32::System::SystemInformation::GetLocalTime();
-    let path = dir.join(file_name(t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond));
+    save_png_at(piece, &dir.join(file_name(t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)))
+}
+
+/// Write a bitmap as a PNG file (also used for pictures pasted into the Claude window).
+pub unsafe fn save_png_at(piece: HBITMAP, path: &std::path::Path) -> Result<()> {
     let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
     let bmp = wic.CreateBitmapFromHBITMAP(piece, HPALETTE::default(), WICBitmapIgnoreAlpha)?;
     let stream = wic.CreateStream()?;
