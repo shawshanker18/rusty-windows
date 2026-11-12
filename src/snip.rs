@@ -1,8 +1,8 @@
 //! Win+Shift+S while we are the shell: Windows' own screen-clip overlay does not come up without
 //! Explorer, so this is ours. Drag a rectangle on a frozen, dimmed picture of the screen; the piece
 //! goes to the clipboard and to Pictures\Screenshots as a PNG. Esc, right-click or clicking away cancels.
-// ponytail: primary monitor, rectangle only (no window / freeform modes, no editor, no delay);
-// add modes when someone asks for them.
+// Windows' toolbar at the top: Rectangle, Window, Full screen, close.
+// ponytail: primary monitor; no freeform mode, editor or delay - add when asked.
 use std::cell::RefCell;
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -21,6 +21,8 @@ struct St {
     h: i32,
     from: Option<POINT>,
     to: POINT,
+    mode: usize,     // 0 rectangle, 1 window
+    wins: Vec<RECT>, // visible windows, front first (window mode)
 }
 
 thread_local! {
@@ -30,6 +32,40 @@ thread_local! {
 /// The rectangle between two corners, whichever way it was dragged.
 pub fn norm(a: (i32, i32), b: (i32, i32)) -> (i32, i32, i32, i32) {
     (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+}
+
+/// The toolbar's buttons (screen px): Rectangle, Window, Full screen, close - 44 px squares in a
+/// panel centred at the top, like Windows' own.
+pub fn buttons(w: i32) -> [(i32, i32, i32, i32); 4] {
+    let left = w / 2 - (4 * 44 + 2 * 4) / 2;
+    std::array::from_fn(|i| {
+        let x = left + 4 + i as i32 * 44;
+        (x, 12, x + 44, 56)
+    })
+}
+
+/// The front-most rectangle holding the point.
+pub fn window_at(wins: &[RECT], x: i32, y: i32) -> Option<RECT> {
+    wins.iter().copied().find(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+}
+
+unsafe fn visible_windows() -> Vec<RECT> {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> BOOL {
+        let v = &mut *(lp.0 as *mut Vec<RECT>);
+        let mut cloaked = 0u32;
+        let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4);
+        if IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() && cloaked == 0 {
+            let mut r = RECT::default();
+            if DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, 16).is_ok() && r.right - r.left > 40 && r.bottom - r.top > 40 {
+                v.push(r);
+            }
+        }
+        true.into()
+    }
+    let mut v: Vec<RECT> = Vec::new();
+    let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
+    v
 }
 
 /// "Screenshot 2026-11-11 163455.png", the way Windows names them.
@@ -68,7 +104,8 @@ unsafe fn run() -> Result<()> {
     SelectObject(mem, old);
     let _ = DeleteDC(mem);
     ReleaseDC(None, screen);
-    ST.with(|s| *s.borrow_mut() = Some(St { shot, dim, w, h, from: None, to: POINT::default() }));
+    let wins = visible_windows();
+    ST.with(|s| *s.borrow_mut() = Some(St { shot, dim, w, h, from: None, to: POINT::default(), mode: 0, wins }));
 
     let inst: HINSTANCE = GetModuleHandleW(None)?.into();
     let class = w!("shellbits_snip");
@@ -145,12 +182,40 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     let ob = SelectObject(back, buf.into());
                     let os = SelectObject(src, st.dim.into());
                     let _ = BitBlt(back, 0, 0, st.w, st.h, Some(src), 0, 0, SRCCOPY);
-                    if let Some(a) = st.from {
-                        let r = norm((a.x, a.y), (st.to.x, st.to.y));
+                    let hi = if st.mode == 1 { window_at(&st.wins, st.to.x, st.to.y).map(|r| (r.left.max(0), r.top.max(0), r.right.min(st.w), r.bottom.min(st.h))) } else { st.from.map(|a| norm((a.x, a.y), (st.to.x, st.to.y))) };
+                    if let Some(r) = hi {
                         SelectObject(src, st.shot.into());
                         let _ = BitBlt(back, r.0, r.1, r.2 - r.0, r.3 - r.1, Some(src), r.0, r.1, SRCCOPY);
                         FrameRect(back, &RECT { left: r.0 - 1, top: r.1 - 1, right: r.2 + 1, bottom: r.3 + 1 }, HBRUSH(GetStockObject(WHITE_BRUSH).0));
                     }
+                    // toolbar
+                    let b = buttons(st.w);
+                    let panel = CreateSolidBrush(COLORREF(0x2C2C2C));
+                    let edge = CreatePen(PS_SOLID, 1, COLORREF(0x454545));
+                    let (opb, opp) = (SelectObject(back, panel.into()), SelectObject(back, edge.into()));
+                    let _ = RoundRect(back, b[0].0 - 4, b[0].1 - 4, b[3].2 + 4, b[3].3 + 4, 16, 16);
+                    SelectObject(back, opb);
+                    SelectObject(back, opp);
+                    let _ = DeleteObject(panel.into());
+                    let _ = DeleteObject(edge.into());
+                    let sel = CreateSolidBrush(COLORREF(0x454545));
+                    let rects = b.map(|r| RECT { left: r.0, top: r.1, right: r.2, bottom: r.3 });
+                    let hov = window_at(&rects, st.to.x, st.to.y);
+                    let font = CreateFontW(-16, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe Fluent Icons"));
+                    let of = SelectObject(back, font.into());
+                    SetBkMode(back, TRANSPARENT);
+                    SetTextColor(back, COLORREF(0xFFFFFF));
+                    for (i, (g, r)) in ['\u{F407}', '\u{F7ED}', '\u{E740}', '\u{E711}'].iter().zip(rects).enumerate() {
+                        let mut rc = RECT { left: r.left + 4, top: r.top + 4, right: r.right - 4, bottom: r.bottom - 4 };
+                        if i == st.mode || hov.is_some_and(|h| h.left == r.left) {
+                            FillRect(back, &rc, sel);
+                        }
+                        let mut t: Vec<u16> = g.to_string().encode_utf16().collect();
+                        DrawTextW(back, &mut t, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                    SelectObject(back, of);
+                    let _ = DeleteObject(font.into());
+                    let _ = DeleteObject(sel.into());
                     let _ = BitBlt(dc, 0, 0, st.w, st.h, Some(back), 0, 0, SRCCOPY);
                     SelectObject(src, os);
                     SelectObject(back, ob);
@@ -163,12 +228,34 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_LBUTTONDOWN => {
             let p = pt();
+            let w = ST.with(|s| s.borrow().as_ref().map_or(0, |st| st.w));
+            if let Some(i) = buttons(w).iter().position(|r| p.x >= r.0 && p.x < r.2 && p.y >= r.1 && p.y < r.3) {
+                match i {
+                    0 | 1 => ST.with(|s| if let Some(st) = s.borrow_mut().as_mut() { st.mode = i; st.from = None; }),
+                    2 => {
+                        let pick = ST.with(|s| s.borrow().as_ref().map(|st| (st.shot, (0, 0, st.w, st.h))));
+                        if let Some((shot, r)) = pick { finish(hwnd, shot, r); }
+                        let _ = DestroyWindow(hwnd);
+                        return LRESULT(0);
+                    }
+                    _ => { let _ = DestroyWindow(hwnd); return LRESULT(0); }
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return LRESULT(0);
+            }
+            if ST.with(|s| s.borrow().as_ref().is_some_and(|st| st.mode == 1)) {
+                // window mode: the window under the point, clipped to the screen
+                let pick = ST.with(|s| s.borrow().as_ref().and_then(|st| window_at(&st.wins, p.x, p.y).map(|r| (st.shot, (r.left.max(0), r.top.max(0), r.right.min(st.w), r.bottom.min(st.h))))));
+                if let Some((shot, r)) = pick { finish(hwnd, shot, r); }
+                let _ = DestroyWindow(hwnd);
+                return LRESULT(0);
+            }
             ST.with(|s| if let Some(st) = s.borrow_mut().as_mut() { st.from = Some(p); st.to = p; });
             SetCapture(hwnd);
         }
         WM_MOUSEMOVE => {
             let p = pt();
-            if ST.with(|s| s.borrow_mut().as_mut().is_some_and(|st| { st.to = p; st.from.is_some() })) {
+            if ST.with(|s| s.borrow_mut().as_mut().is_some_and(|st| { st.to = p; true })) {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
         }
@@ -203,6 +290,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_and_window_pick() {
+        let b = buttons(1920);
+        assert_eq!(b[0].0, 1920 / 2 - 92 + 4);
+        assert_eq!(b[3].2 - b[0].0, 176);
+        let wins = [RECT { left: 0, top: 0, right: 100, bottom: 100 }, RECT { left: 0, top: 0, right: 500, bottom: 500 }];
+        assert_eq!(window_at(&wins, 50, 50).unwrap().right, 100);
+        assert_eq!(window_at(&wins, 300, 300).unwrap().right, 500);
+        assert!(window_at(&wins, 600, 600).is_none());
+    }
 
     #[test]
     fn rectangle_and_name() {

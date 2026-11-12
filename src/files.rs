@@ -473,9 +473,23 @@ pub fn click_select(sel: Option<usize>, more: &[usize], i: usize, ctrl: bool, sh
 
 /// A free "New folder" / "New folder (2)" ... name in `dir`.
 pub fn new_folder_name(dir: &str) -> String {
-    let base = std::path::Path::new(dir);
-    (1..).map(|n| if n == 1 { "New folder".to_string() } else { format!("New folder ({n})") }).find(|n| !base.join(n).exists()).unwrap()
+    new_name(dir, "New folder", "")
 }
+
+/// A free "<base><ext>" / "<base> (2)<ext>" ... name in `dir`.
+pub fn new_name(dir: &str, base: &str, ext: &str) -> String {
+    let d = std::path::Path::new(dir);
+    (1..).map(|n| if n == 1 { format!("{base}{ext}") } else { format!("{base} ({n}){ext}") }).find(|n| !d.join(n).exists()).unwrap()
+}
+
+/// Windows' New menu: (label, base name, extension, starting bytes); an empty extension makes a folder.
+pub const NEW_KINDS: [(&str, &str, &str, &[u8]); 4] = [
+    ("Folder", "New folder", "", b""),
+    ("Text Document", "New Text Document", ".txt", b""),
+    ("Rich Text Document", "New Rich Text Document", ".rtf", b"{\rtf1}"),
+    // an empty zip: just the end-of-central-directory record
+    ("Compressed (zipped) Folder", "New Compressed (zipped) Folder", ".zip", b"PK                  "),
+];
 
 /// Run one of Windows' own file commands ("cut", "copy", "paste", "delete") on the given items of
 /// `folder` (all at once, like a multi-selection), or on the folder itself when `items` is empty.
@@ -1486,8 +1500,22 @@ unsafe fn command(hwnd: HWND, h: Hit, s: f32) {
             let _ = SetFocus(Some(se));
         }
         Hit::Cmd(0) if folder != THIS_PC && folder != HOME => {
-            let name = new_folder_name(&folder);
-            let _ = std::fs::create_dir(std::path::Path::new(&folder).join(&name));
+            // like Windows: a menu of what can be made, then the new item's name is ready to type over
+            let Ok(m) = CreatePopupMenu() else { return };
+            for (k, (label, ..)) in NEW_KINDS.iter().enumerate() {
+                let _ = AppendMenuW(m, MF_STRING, k + 1, &HSTRING::from(*label));
+                if k == 0 {
+                    let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+                }
+            }
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let cmd = TrackPopupMenu(m, TPM_RETURNCMD, pt.x, pt.y, None, hwnd, None).0;
+            let _ = DestroyMenu(m);
+            let Some((_, base, ext, bytes)) = (cmd as usize).checked_sub(1).and_then(|k| NEW_KINDS.get(k)) else { return };
+            let name = new_name(&folder, base, ext);
+            let path = std::path::Path::new(&folder).join(&name);
+            let _ = if ext.is_empty() { std::fs::create_dir(&path) } else { std::fs::write(&path, bytes) };
             UI.with(|u| {
                 let mut ui = u.borrow_mut();
                 load(&mut ui);
@@ -1702,6 +1730,8 @@ mod tests {
         let dir = std::env::temp_dir().join("shellbits-newfolder-test");
         let _ = std::fs::create_dir_all(dir.join("New folder"));
         assert_eq!(new_folder_name(&dir.display().to_string()), "New folder (2)");
+        assert_eq!(new_name(&dir.display().to_string(), "New Text Document", ".txt"), "New Text Document.txt");
+        assert_eq!(NEW_KINDS[3].3.len(), 22);
         let _ = std::fs::remove_dir_all(dir);
     }
     #[test]
