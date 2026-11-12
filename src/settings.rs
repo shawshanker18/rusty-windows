@@ -457,6 +457,43 @@ macro_rules! reg_choice {
 
 const ADV: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
 
+// Accessibility > Visual effects
+reg_switch!(always_scrollbars, set_always_scrollbars, r"Control Panel\Accessibility", "DynamicScrollbars", on = 0, off = 1, missing = false);
+fn spi_u32(get: u32) -> u32 {
+    let mut v = 0u32;
+    unsafe { let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(get), 0, Some(&mut v as *mut _ as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    v
+}
+fn set_spi(set: u32, v: u32) {
+    // these two take the value in pvParam, not uiParam
+    unsafe { let _ = SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(set), 0, Some(v as usize as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); }
+}
+fn animations() -> bool {
+    spi_u32(0x1042) != 0 // SPI_GETCLIENTAREAANIMATION
+}
+fn set_animations(on: bool) {
+    set_spi(0x1043, on as u32)
+}
+const DURATIONS: [(&str, u32); 6] = [("5 seconds", 5), ("7 seconds", 7), ("15 seconds", 15), ("30 seconds", 30), ("1 minute", 60), ("5 minutes", 300)];
+fn toast_time() -> String {
+    let v = spi_u32(0x2016); // SPI_GETMESSAGEDURATION
+    DURATIONS[choice_index(Some(v), &DURATIONS.map(|d| d.1), 0)].0.to_string()
+}
+fn toast_times() -> Vec<String> {
+    DURATIONS.iter().map(|d| d.0.to_string()).collect()
+}
+fn set_toast_time(i: usize) {
+    if let Some(d) = DURATIONS.get(i) {
+        set_spi(0x2017, d.1)
+    }
+}
+
+// Privacy & security > Recommendations & offers
+reg_switch!(ad_id, set_ad_id, r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo", "Enabled", on = 1, off = 0, missing = false);
+reg_switch!(local_content, set_local_content, r"Control Panel\International\User Profile", "HttpAcceptLanguageOptOut", on = 0, off = 1, missing = true);
+reg_switch!(track_launches, set_track_launches, ADV, "Start_TrackProgs", on = 1, off = 0, missing = true);
+reg_switch!(settings_tips, set_settings_tips, r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager", "SubscribedContent-338393Enabled", on = 1, off = 0, missing = true);
+
 // Multitasking
 fn snap_on() -> bool {
     let mut on = windows::core::BOOL(0);
@@ -1748,6 +1785,18 @@ fn pages() -> Vec<Page> {
             r(0xE8AB, "Show tabs from apps when snapping or pressing Alt+Tab", "", Choice(alt_tab, alt_tabs, set_alt_tab)),
             r(0xE7C4, "Title bar window shake", "When I grab a window's title bar and shake it, minimize all other windows", Toggle(shake, set_shake)),
         ]),
+        sub("Visual effects", "Accessibility", vec![
+            r(0xE794, "Always show scrollbars", "", Toggle(always_scrollbars, set_always_scrollbars)),
+            r(0xE794, "Transparency effects", "", Toggle(transparency, set_transparency)),
+            r(0xE794, "Animation effects", "", Toggle(animations, set_animations)),
+            r(0xEA8F, "Dismiss notifications after this amount of time", "", Choice(toast_time, toast_times, set_toast_time)),
+        ]),
+        sub("Recommendations & offers", "Privacy & security", vec![
+            r(0xE72E, "Personalized offers", "Let apps show me personalized ads by using my advertising ID", Toggle(ad_id, set_ad_id)),
+            r(0xE774, "Language list", "Let websites show me locally relevant content by accessing my language list", Toggle(local_content, set_local_content)),
+            r(0xE8FC, "Improve Start and search results", "Let Windows improve Start and search results by tracking app launches", Toggle(track_launches, set_track_launches)),
+            r(0xE713, "Settings suggestions", "Show me suggested content in the Settings app", Toggle(settings_tips, set_settings_tips)),
+        ]),
         sub("Clipboard", "System", vec![
             r(0xE77F, "Clipboard history", "Save multiple items to the clipboard to use later. Press Windows logo key + V to view your clipboard history and paste from it.", Toggle(clip_history, set_clip_history)),
             r(0xE72E, "Sync across your devices and clear clipboard data", "On Windows' own Clipboard page", Link("ms-settings:clipboard")),
@@ -1817,7 +1866,7 @@ fn pages() -> Vec<Page> {
         top("Accessibility", 0xE776, vec![
             r(0, "Vision", "", Header),
             r(0xE8E9, "Text size", "Text size that appears throughout Windows and your apps", Link("ms-settings:easeofaccess-display")),
-            r(0xE794, "Visual effects", "Scroll bars, transparency, animations, notification timeout", Link("ms-settings:easeofaccess-visualeffects")),
+            r(0xE794, "Visual effects", "Scroll bars, transparency, animations, notification timeout", Sub("Visual effects")),
             r(0xE7C9, "Mouse pointer and touch", "Mouse pointer color, size", Link("ms-settings:easeofaccess-mousepointer")),
             r(SET | 0xE330, "Text cursor", "Appearance and thickness, text cursor indicator", Link("ms-settings:easeofaccess-cursor")),
             r(0xE8A3, "Magnifier", "Magnifier reading, zoom increment", Link("ms-settings:easeofaccess-magnifier")),
@@ -1840,7 +1889,7 @@ fn pages() -> Vec<Page> {
             r(0xEA18, "Windows Security", "Antivirus, browser, firewall, and network protection for your device", Link("windowsdefender:")),
             r(0xE707, "Find my device", "Track your device if you think you've lost it", Link("ms-settings:findmydevice")),
             r(0, "Windows permissions", "", Section),
-            r(0xE72E, "Recommendations & offers", "Advertising ID, personalized offers, local content, app launches, settings suggestions, productivity tools", Link("ms-settings:privacy")),
+            r(0xE72E, "Recommendations & offers", "Advertising ID, personalized offers, local content, app launches, settings suggestions, productivity tools", Sub("Recommendations & offers")),
             r(0xEFA9, "Speech", "Online speech recognition for dictation and other voice-based interactions", Link("ms-settings:privacy-speech")),
             r(0xEADF, "Inking & typing personalization", "Custom dictionary, words in your dictionary", Link("ms-settings:privacy-speechtyping")),
             r(0xE9D9, "Diagnostics & feedback", "Diagnostic data, inking and typing data, feedback frequency", Link("ms-settings:privacy-feedback")),
