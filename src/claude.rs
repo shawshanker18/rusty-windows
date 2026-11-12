@@ -110,6 +110,13 @@ static CONTEXT: Mutex<Option<f32>> = Mutex::new(None);
 static CONTEXT_TOKENS: Mutex<Option<(f64, f64)>> = Mutex::new(None); // tokens in use, window size
 static WINDOW: Mutex<Option<f64>> = Mutex::new(None); // the model's context window, once the CLI has reported it
 static BUSY: AtomicBool = AtomicBool::new(false);
+static BUSY_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // tick count when the reply was asked for
+
+/// The status line under a reply being written: "Working... 12s", minutes once past a minute.
+pub fn status_line(ms: u64) -> String {
+    let s = ms / 1000;
+    if s < 60 { format!("Working… {s}s") } else { format!("Working… {}m {}s", s / 60, s % 60) }
+}
 static IDLE_SINCE: Mutex<Option<std::time::Instant>> = Mutex::new(None); // when the session last did anything
 
 /// Environment variables that belong to a Claude Code session we were started from: all CLAUDE* and
@@ -945,6 +952,7 @@ fn send(text: String) {
             return;
         }
         BUSY.store(true, Relaxed);
+        BUSY_SINCE.store(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }, Relaxed);
         let ok = write_line(serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } }));
         if !ok {
             stop_proc();
@@ -1879,6 +1887,8 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
             let br = rt.CreateSolidColorBrush(&D2D1_COLOR_F { a, ..rgb(C_ACCENT) }, None)?;
             rt.FillEllipse(&D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: x0 + 4.0 + k as f32 * 9.0, Y: y + 2.0 }, radiusX: 2.5, radiusY: 2.5 }, &br);
         }
+        let ms = windows::Win32::System::SystemInformation::GetTickCount64().saturating_sub(BUSY_SINCE.load(Relaxed));
+        rt.DrawText(&utf16(&status_line(ms)), &g.small, &rect(x0 + 34.0, y - 8.0, x0 + 300.0, y + 12.0), &dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
     }
     rt.PopAxisAlignedClip();
     ui.items = items;
@@ -2822,6 +2832,12 @@ pub unsafe fn snapshot(path: &str) -> windows::core::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_line_counts_up() {
+        assert_eq!(super::status_line(12_400), "Working… 12s");
+        assert_eq!(super::status_line(75_000), "Working… 1m 15s");
+    }
+
     #[test]
     fn slash_list_has_builtins_then_user_ones_once() {
         let v = super::slash_commands(&["ponytail".into(), "compact".into()], &["deploy".into()]);
