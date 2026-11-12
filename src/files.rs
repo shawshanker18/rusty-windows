@@ -471,10 +471,6 @@ pub fn click_select(sel: Option<usize>, more: &[usize], i: usize, ctrl: bool, sh
     (Some(i), Vec::new())
 }
 
-/// A free "New folder" / "New folder (2)" ... name in `dir`.
-pub fn new_folder_name(dir: &str) -> String {
-    new_name(dir, "New folder", "")
-}
 
 /// A free "<base><ext>" / "<base> (2)<ext>" ... name in `dir`.
 pub fn new_name(dir: &str, base: &str, ext: &str) -> String {
@@ -1729,7 +1725,7 @@ mod tests {
         assert_eq!(c[1].1, "C:\\");
         let dir = std::env::temp_dir().join("shellbits-newfolder-test");
         let _ = std::fs::create_dir_all(dir.join("New folder"));
-        assert_eq!(new_folder_name(&dir.display().to_string()), "New folder (2)");
+        assert_eq!(new_name(&dir.display().to_string(), "New folder", ""), "New folder (2)");
         assert_eq!(new_name(&dir.display().to_string(), "New Text Document", ".txt"), "New Text Document.txt");
         assert_eq!(NEW_KINDS[3].3.len(), 22);
         let _ = std::fs::remove_dir_all(dir);

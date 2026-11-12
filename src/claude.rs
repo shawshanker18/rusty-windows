@@ -196,8 +196,130 @@ pub fn context_tokens(usage: &serde_json::Value, model: &str, known_window: Opti
 pub enum Pane {
     Files,
     Diff,
+    Terminal,
+    Preview,
 }
 const PANE_W: f32 = 520.0;
+
+/// Terminal pane: what has been run and printed, and the folder commands run in.
+static TERM: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static TERM_DIR: Mutex<String> = Mutex::new(String::new());
+static TEDIT: AtomicIsize = AtomicIsize::new(0);
+/// Preview pane: local servers that are listening, as (port, program).
+static SERVERS: Mutex<Vec<(u16, String)>> = Mutex::new(Vec::new());
+
+/// `cd <dir>` resolved against the current folder, or None when the command is something else.
+pub fn cd_target(cur: &str, cmd: &str) -> Option<String> {
+    let rest = cmd.trim().strip_prefix("cd")?;
+    if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\\') || rest.starts_with('.')) {
+        return None; // e.g. "cdk"
+    }
+    let arg = rest.trim().trim_start_matches("/d ").trim().trim_matches('"');
+    if arg.is_empty() {
+        return Some(cur.to_string());
+    }
+    let p = std::path::Path::new(cur).join(arg);
+    Some(std::fs::canonicalize(&p).map(|c| c.display().to_string().trim_start_matches(r"\\?\").to_string()).unwrap_or_else(|_| p.display().to_string()))
+}
+
+/// Run one command line in the Terminal pane's folder (cmd.exe, like Windows Terminal's default
+/// prompt) and append its output. ponytail: no TTY - interactive programs that wait for input
+/// will not get any; a real console host (ConPTY) when that matters.
+fn term_run(cmd: String) {
+    let dir = TERM_DIR.lock().unwrap().clone();
+    let short = dir.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or(&dir).to_string();
+    TERM.lock().unwrap().push(format!("{short}> {cmd}"));
+    notify();
+    if let Some(d) = cd_target(&dir, &cmd) {
+        if std::path::Path::new(&d).is_dir() {
+            *TERM_DIR.lock().unwrap() = d;
+        } else {
+            TERM.lock().unwrap().push("The system cannot find the path specified.".into());
+        }
+        notify();
+        return;
+    }
+    if cmd.trim() == "cls" || cmd.trim() == "clear" {
+        TERM.lock().unwrap().clear();
+        notify();
+        return;
+    }
+    std::thread::spawn(move || {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("cmd.exe").arg("/d").arg("/s").arg("/c").raw_arg(format!("\"{cmd}\"")).current_dir(&dir).creation_flags(0x0800_0000).output();
+        let mut t = TERM.lock().unwrap();
+        match out {
+            Ok(o) => {
+                for l in String::from_utf8_lossy(&o.stdout).lines().chain(String::from_utf8_lossy(&o.stderr).lines()) {
+                    t.push(l.replace('\t', "    "));
+                }
+            }
+            Err(e) => t.push(e.to_string()),
+        }
+        let n = t.len();
+        if n > 5000 {
+            t.drain(..n - 5000);
+        }
+        drop(t);
+        notify();
+    });
+}
+
+unsafe extern "system" fn term_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_KEYDOWN && wp.0 == VK_RETURN.0 as usize {
+        let cmd = edit_text(hwnd);
+        let _ = SetWindowTextW(hwnd, w!(""));
+        if !cmd.trim().is_empty() {
+            UI.with(|u| if let Ok(mut u) = u.try_borrow_mut() { u.pane_scroll = f32::MAX; });
+            term_run(cmd);
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_CHAR && wp.0 == 13 {
+        return LRESULT(0);
+    }
+    let prev: WNDPROC = std::mem::transmute(TERM_PROC.load(Relaxed));
+    CallWindowProcW(prev, hwnd, msg, wp, lp)
+}
+static TERM_PROC: AtomicIsize = AtomicIsize::new(0);
+
+/// Listening TCP ports from `netstat -ano -p tcp` that a browser could open (1024 and up), with the
+/// process id, each port once.
+pub fn listening(netstat: &str) -> Vec<(u16, u32)> {
+    let mut v: Vec<(u16, u32)> = Vec::new();
+    for l in netstat.lines() {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() == 5 && f[0] == "TCP" && f[3] == "LISTENING" {
+            let (addr, pid) = (f[1], f[4].parse().unwrap_or(0));
+            let local = addr.starts_with("127.0.0.1:") || addr.starts_with("0.0.0.0:") || addr.starts_with("[::1]:") || addr.starts_with("[::]:");
+            if let Some(port) = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+                if local && port >= 1024 && !v.iter().any(|x| x.0 == port) {
+                    v.push((port, pid));
+                }
+            }
+        }
+    }
+    v.sort();
+    v
+}
+
+fn load_servers() {
+    *SERVERS.lock().unwrap() = Vec::new();
+    std::thread::spawn(|| {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("netstat").args(["-ano", "-p", "tcp"]).creation_flags(0x0800_0000).output();
+        let ports = listening(&out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default());
+        let names = std::process::Command::new("tasklist").args(["/fo", "csv", "/nh"]).creation_flags(0x0800_0000).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let name_of = |pid: u32| names.lines().find_map(|l| {
+            let f: Vec<&str> = l.split("\",\"").collect();
+            (f.get(1).map(|x| x.trim_matches('"')) == Some(&pid.to_string())).then(|| f[0].trim_matches('"').to_string())
+        }).unwrap_or_default();
+        // Windows' own listeners (RPC, printing, sign-in) are not something to preview
+        const SYSTEM: [&str; 7] = ["", "System", "svchost.exe", "lsass.exe", "wininit.exe", "services.exe", "spoolsv.exe"];
+        *SERVERS.lock().unwrap() = ports.into_iter().filter(|(p, _)| *p < 49152).map(|(p, pid)| (p, name_of(pid))).filter(|(_, n)| !SYSTEM.contains(&n.as_str())).collect();
+        notify();
+    });
+}
 
 /// The lines of the Diff pane (git's output), or why there are none.
 static DIFF: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -1600,6 +1722,8 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
         let title = match pane {
             Pane::Files => ui.pane_dir.rsplit(['\\', '/']).find(|p| !p.is_empty()).unwrap_or("Files").to_string(),
             Pane::Diff => "Changes".to_string(),
+            Pane::Terminal => "Terminal".to_string(),
+            Pane::Preview => "Preview".to_string(),
         };
         txt(&title, &g.side, rect(x + 17.0, TOP + 8.0, cw - 48.0, TOP + 36.0), &white);
         let close = rect(cw - 40.0, TOP + 8.0, cw - 12.0, TOP + 36.0);
@@ -1640,6 +1764,41 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
                 for (k, line) in lines.iter().enumerate().skip(first).take(((bot - top) / 18.0) as usize + 2) {
                     let y = top + k as f32 * 18.0 - ui.pane_scroll;
                     txt(line, &g.mono, rect(x + 14.0, y, cw + 2000.0, y + 18.0), &b(diff_colour(line))?);
+                }
+            }
+            Pane::Terminal => {
+                // output above, the command box (a child edit) in the last 40 px
+                let lines = TERM.lock().unwrap().clone();
+                let view = bot - top - 44.0;
+                ui.pane_scroll = ui.pane_scroll.clamp(0.0, (lines.len() as f32 * 18.0 - view).max(0.0));
+                let first = (ui.pane_scroll / 18.0) as usize;
+                for (k, line) in lines.iter().enumerate().skip(first).take((view / 18.0) as usize + 2) {
+                    let y = top + k as f32 * 18.0 - ui.pane_scroll;
+                    if y + 18.0 > top + view { break; }
+                    let c = if line.split_once("> ").is_some_and(|(d, _)| !d.contains(' ') && !d.is_empty()) { 0x6CB4EE } else { 0xD8D8D8 };
+                    txt(line, &g.mono, rect(x + 14.0, y, cw + 2000.0, y + 18.0), &b(c)?);
+                }
+                let boxr = rect(x + 10.0, bot - 38.0, cw - 10.0, bot - 4.0);
+                rt.FillRoundedRectangle(&rrect(boxr, 8.0), &b(0x1A1A1A)?);
+                rt.DrawRoundedRectangle(&rrect(boxr, 8.0), &b(C_SEL)?, 1.0, None);
+                txt(">", &g.mono, rect(x + 20.0, bot - 38.0, x + 34.0, bot - 4.0), &b(0x6CB4EE)?);
+            }
+            Pane::Preview => {
+                // the app previews a running dev server; here: the local servers, click opens one
+                let servers = SERVERS.lock().unwrap().clone();
+                if servers.is_empty() {
+                    txt("No local server is running. Start one (npm run dev, cargo run ...) and it shows here.", &g.small, rect(x + 17.0, top, cw - 16.0, top + 26.0), &soft);
+                }
+                for (k, (port, name)) in servers.iter().enumerate() {
+                    let y = top + k as f32 * 44.0;
+                    let r = rect(x + 8.0, y, cw - 8.0, y + 40.0);
+                    if hov(Act::PaneRow(k)) {
+                        rt.FillRoundedRectangle(&rrect(r, 5.0), &b(C_HOVER)?);
+                    }
+                    lucide(rt, "globe", rect(x + 16.0, y, x + 38.0, y + 40.0), 17.0, &soft);
+                    txt(&format!("http://localhost:{port}"), &g.side, rect(x + 47.0, y + 2.0, cw - 16.0, y + 22.0), &white);
+                    txt(name, &g.small, rect(x + 47.0, y + 20.0, cw - 16.0, y + 38.0), &soft);
+                    hits.push((r, Act::PaneRow(k)));
                 }
             }
         }
@@ -2117,7 +2276,17 @@ unsafe fn place_edit(hwnd: HWND) {
     let _ = GetClientRect(hwnd, &mut rc);
     let s = GetDpiForWindow(hwnd) as f32 / 96.0;
     let (cw, ch) = (rc.right as f32 / s, rc.bottom as f32 / s);
-    let right = UI.with(|u| if u.borrow().panel { RIGHT } else { 0.0 });
+    let (right, term) = UI.with(|u| {
+        let u = u.borrow();
+        (match u.pane { Some(_) => PANE_W.min(cw * 0.45), None if u.panel => RIGHT, None => 0.0 }, u.pane == Some(Pane::Terminal))
+    });
+    let t = HWND(TEDIT.load(Relaxed) as *mut c_void);
+    if term {
+        let x = cw - right;
+        let _ = SetWindowPos(t, None, ((x + 36.0) * s) as i32, ((ch - 8.0 - 30.0) * s) as i32, ((right - 56.0) * s) as i32, (18.0 * s) as i32, SWP_NOZORDER | SWP_SHOWWINDOW);
+    } else {
+        let _ = ShowWindow(t, SW_HIDE);
+    }
     let width = COL.min(cw - right - SIDE - 49.0);
     let x0 = col_x(SIDE + 1.0, cw, cw - right, width);
     let e = HWND(EDIT.load(Relaxed) as *mut c_void);
@@ -2426,7 +2595,10 @@ unsafe fn click(hwnd: HWND, act: Act) {
                 windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(f), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
             }
         }
-        Act::PaneClose => UI.with(|u| u.borrow_mut().pane = None),
+        Act::PaneClose => {
+            UI.with(|u| u.borrow_mut().pane = None);
+            place_edit(hwnd);
+        }
         Act::PaneUp => UI.with(|u| {
             let u = &mut *u.borrow_mut();
             if let Some(parent) = std::path::Path::new(&u.pane_dir).parent().map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.is_empty()) {
@@ -2435,6 +2607,11 @@ unsafe fn click(hwnd: HWND, act: Act) {
                 u.pane_scroll = 0.0;
             }
         }),
+        Act::PaneRow(i) if UI.with(|u| u.borrow().pane == Some(Pane::Preview)) => {
+            if let Some((port, _)) = SERVERS.lock().unwrap().get(i).cloned() {
+                windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(format!("http://localhost:{port}")), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+            }
+        }
         Act::PaneRow(i) => {
             // a folder opens in the pane; a file opens with whatever Windows opens it with
             let file = UI.with(|u| {
@@ -2481,7 +2658,30 @@ unsafe fn click(hwnd: HWND, act: Act) {
                 windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(file), &windows::core::HSTRING::from(args), &windows::core::HSTRING::from(folder.as_str()), SW_SHOWNORMAL);
             };
             match k {
-                0 => run("wt.exe", &format!("-d \"{folder}\"")),
+                0 | 2 => {
+                    // Terminal / Preview pane, docked on the right (click again to close)
+                    let want = if k == 0 { Pane::Terminal } else { Pane::Preview };
+                    let open = UI.with(|u| {
+                        let u = &mut *u.borrow_mut();
+                        u.pane = if u.pane == Some(want) { None } else { Some(want) };
+                        u.pane_scroll = f32::MAX;
+                        u.pane.is_some()
+                    });
+                    if open && k == 0 {
+                        let mut d = TERM_DIR.lock().unwrap();
+                        if d.is_empty() || TERM.lock().unwrap().is_empty() {
+                            *d = folder.clone();
+                        }
+                        drop(d);
+                        place_edit(hwnd);
+                        let _ = SetFocus(Some(HWND(TEDIT.load(Relaxed) as *mut c_void)));
+                    } else {
+                        place_edit(hwnd);
+                    }
+                    if open && k == 2 {
+                        load_servers();
+                    }
+                }
                 1 => {
                     // the Diff pane, docked on the right (click again to close)
                     let open = UI.with(|u| {
@@ -2494,7 +2694,6 @@ unsafe fn click(hwnd: HWND, act: Act) {
                         load_diff(folder.clone());
                     }
                 }
-                2 => run("https://localhost", ""),
                 3 => UI.with(|u| {
                     // the Files pane, docked on the right (click again to close)
                     let u = &mut *u.borrow_mut();
@@ -2548,6 +2747,11 @@ pub unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             SendMessageW(e, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
             EDIT_PROC.store(SetWindowLongPtrW(e, GWLP_WNDPROC, edit_proc as *const () as usize as isize), Relaxed);
             EDIT.store(e.0 as isize, Relaxed);
+            let t = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), w!(""), WS_CHILD | WINDOW_STYLE(ES_AUTOHSCROLL as u32), 0, 0, 10, 10, Some(hwnd), None, inst, None).unwrap_or_default();
+            let mono = CreateFontW(-(13.0 * s) as i32, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Cascadia Mono"));
+            SendMessageW(t, WM_SETFONT, Some(WPARAM(mono.0 as usize)), Some(LPARAM(1)));
+            TERM_PROC.store(SetWindowLongPtrW(t, GWLP_WNDPROC, term_proc as *const () as usize as isize), Relaxed);
+            TEDIT.store(t.0 as isize, Relaxed);
             SetTimer(Some(hwnd), T_ANIM, 380, None);
             std::thread::spawn(|| {
                 *SESSIONS.lock().unwrap() = scan_sessions();
@@ -2768,6 +2972,18 @@ pub unsafe fn snapshot(path: &str) -> windows::core::Result<()> {
                 let u = &mut *u.borrow_mut();
                 (u.pane, u.pane_files, u.pane_dir) = (Some(Pane::Files), list_dir(&first.cwd), first.cwd.clone());
             }),
+            "terminal" => {
+                *TERM_DIR.lock().unwrap() = first.cwd.clone();
+                term_run("echo hello from the terminal pane".into());
+                term_run("cd ..".into());
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                UI.with(|u| { let u = &mut *u.borrow_mut(); u.pane = Some(Pane::Terminal); u.pane_scroll = f32::MAX; });
+            }
+            "preview" => {
+                load_servers();
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                UI.with(|u| u.borrow_mut().pane = Some(Pane::Preview));
+            }
             "diff" => {
                 UI.with(|u| u.borrow_mut().pane = Some(Pane::Diff));
                 load_diff(first.cwd.clone());
@@ -2836,6 +3052,17 @@ mod tests {
     fn status_line_counts_up() {
         assert_eq!(super::status_line(12_400), "Working… 12s");
         assert_eq!(super::status_line(75_000), "Working… 1m 15s");
+    }
+
+    #[test]
+    fn terminal_cd_and_listening_ports() {
+        let tmp = std::env::temp_dir().display().to_string();
+        assert!(super::cd_target(&tmp, "dir").is_none());
+        assert!(super::cd_target(&tmp, "cdk deploy").is_none());
+        assert_eq!(super::cd_target(&tmp, "cd").unwrap(), tmp);
+        assert!(super::cd_target(&tmp, "cd ..").unwrap().len() < tmp.len());
+        let ns = "  TCP    0.0.0.0:135     0.0.0.0:0   LISTENING   1100\n  TCP    127.0.0.1:5173  0.0.0.0:0   LISTENING   42\n  TCP    [::]:5173       [::]:0      LISTENING   42\n  TCP    192.168.1.5:3000  0.0.0.0:0  LISTENING   7\n  TCP    127.0.0.1:8080  1.2.3.4:5  ESTABLISHED  9\n";
+        assert_eq!(super::listening(ns), vec![(5173, 42)]);
     }
 
     #[test]
