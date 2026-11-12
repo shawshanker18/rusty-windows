@@ -70,11 +70,12 @@ pub struct Entry {
     pub tool: String,       // tool name for Tool entries
     pub request_id: String, // Permission
     pub input: String,      // Permission: original tool input (JSON)
+    pub images: Vec<String>, // User: pictures sent with the message (base64), shown as thumbnails
 }
 
 impl Entry {
     fn new(kind: Kind, text: impl Into<String>) -> Self {
-        Entry { kind, text: text.into(), tool: String::new(), request_id: String::new(), input: String::new() }
+        Entry { kind, text: text.into(), tool: String::new(), request_id: String::new(), input: String::new(), images: Vec::new() }
     }
 }
 
@@ -632,6 +633,8 @@ pub fn apply(v: &serde_json::Value, log: &mut Vec<Entry>, live: &mut Option<usiz
                 }
             }
             let mut changed = false;
+            let pics: Vec<String> = if history { content.as_array().into_iter().flatten().filter(|b| b["type"] == "image").filter_map(|b| b["source"]["data"].as_str().map(String::from)).collect() } else { Vec::new() };
+            let before = log.len();
             for b in content.as_array().into_iter().flatten() {
                 if b["type"] == "tool_result" {
                     let t = text_of(&b["content"]);
@@ -649,6 +652,18 @@ pub fn apply(v: &serde_json::Value, log: &mut Vec<Entry>, live: &mut Option<usiz
                         changed = true;
                     }
                 }
+            }
+            if !pics.is_empty() {
+                // the pictures belong to the message they came with (or stand alone)
+                match log[before..].iter_mut().rev().find(|e| e.kind == Kind::User) {
+                    Some(e) => e.images = pics,
+                    None => {
+                        let mut e = Entry::new(Kind::User, "");
+                        e.images = pics;
+                        log.push(e);
+                    }
+                }
+                changed = true;
             }
             changed
         }
@@ -1067,6 +1082,44 @@ fn write_line(v: serde_json::Value) -> bool {
 }
 
 /// Standard base64 (for pictures sent inside a message).
+/// Standard base64 back to bytes (padding and line breaks allowed). None if it is not base64.
+pub fn unbase64(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c { b'A'..=b'Z' => c - b'A', b'a'..=b'z' => c - b'a' + 26, b'0'..=b'9' => c - b'0' + 52, b'+' => 62, b'/' => 63, _ => return None } as u32)
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for c in bytes.chunks(4) {
+        let n = c.iter().try_fold(0u32, |acc, b| Some(acc << 6 | val(*b)?))? << (6 * (4 - c.len()));
+        let k = match c.len() { 4 => 3, 3 => 2, 2 => 1, _ => return None };
+        out.extend_from_slice(&n.to_be_bytes()[1..1 + k]);
+    }
+    Some(out)
+}
+
+/// A picture's bytes as a thumbnail that fits max_w x max_h: (w, h, premultiplied BGRA).
+fn picture_thumb(bytes: &[u8], max_w: u32, max_h: u32) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::*;
+    unsafe {
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = wic.CreateStream().ok()?;
+        stream.InitializeFromMemory(bytes).ok()?;
+        let dec = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = dec.GetFrame(0).ok()?;
+        let (mut w, mut h) = (0u32, 0u32);
+        frame.GetSize(&mut w, &mut h).ok()?;
+        let (tw, th) = crate::clip::fit(w, h, max_w, max_h);
+        let sc = wic.CreateBitmapScaler().ok()?;
+        sc.Initialize(&frame, tw, th, WICBitmapInterpolationModeFant).ok()?;
+        let conv = wic.CreateFormatConverter().ok()?;
+        conv.Initialize(&sc, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
+        let mut px = vec![0u8; (tw * th * 4) as usize];
+        conv.CopyPixels(std::ptr::null(), tw * 4, &mut px).ok()?;
+        Some((tw, th, px))
+    }
+}
+
 pub fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -1124,7 +1177,9 @@ fn send(text: String) {
     }
     // pictures up to 5 MB go along as images
     let (text, content) = message_content(&text, |p| std::fs::read(p).ok().filter(|b| b.len() <= 5_000_000));
-    LOG.lock().unwrap().push(Entry::new(Kind::User, text.clone()));
+    let mut e = Entry::new(Kind::User, text.clone());
+    e.images = content.as_array().into_iter().flatten().filter(|b| b["type"] == "image").filter_map(|b| b["source"]["data"].as_str().map(String::from)).collect();
+    LOG.lock().unwrap().push(e);
     *IDLE_SINCE.lock().unwrap() = Some(std::time::Instant::now());
     notify();
     std::thread::spawn(move || {
@@ -1519,7 +1574,8 @@ enum Part {
 const CELL_PAD: f32 = 12.0; // around a table cell's text
 
 enum Item {
-    User(IDWriteTextLayout, String), // layout, the message as typed (for Copy)
+    User(IDWriteTextLayout, String, Vec<(ID2D1Bitmap, f32, f32)>), // layout, the message as typed (for Copy), picture thumbnails
+
     Text(Vec<Part>, String),         // parts, the reply's markdown (for Copy)
     Group { start: usize, label: String, lines: Vec<IDWriteTextLayout>, open: bool },
     Permission(usize, IDWriteTextLayout),
@@ -1541,8 +1597,17 @@ unsafe fn build(g: &Gfx, log: &[Entry], width: f32, ui: &Ui) -> Vec<(Item, f32)>
             Kind::User => {
                 if let Ok(l) = g.dw.CreateTextLayout(&utf16(&e.text), &g.body, width * 0.75, 1e6) {
                     let _ = l.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 21.0, 16.0);
-                    let h = metrics(&l).height + 22.0;
-                    out.push((Item::User(l, e.text.clone()), h));
+                    // pictures sent with it: thumbnails under the bubble, like the app
+                    let props = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
+                    let thumbs: Vec<(ID2D1Bitmap, f32, f32)> = e.images.iter().filter_map(|d| unbase64(d)).filter_map(|b| picture_thumb(&b, 240, 160))
+                        .filter_map(|(w, h, px)| g.rt.CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as *const c_void), w * 4, &props).ok().map(|bm| (bm, w as f32, h as f32))).collect();
+                    let empty = e.text.trim().is_empty();
+                    let text_h = if empty { 0.0 } else { metrics(&l).height + 22.0 };
+                    let pics_h = thumbs.iter().map(|t| t.2).fold(0.0, f32::max);
+                    let h = text_h + if pics_h > 0.0 { pics_h + if empty { 0.0 } else { 8.0 } } else { 0.0 };
+                    if h > 0.0 {
+                        out.push((Item::User(l, e.text.clone(), thumbs), h));
+                    }
                 }
                 i += 1;
             }
@@ -2053,13 +2118,30 @@ unsafe fn draw(ui: &mut Ui, cw: f32, ch: f32, maximized: bool) -> windows::core:
     for (item, h) in &items {
         if y + h >= view_top && y <= view_bot {
             match item {
-                Item::User(l, raw) => {
+                Item::User(l, raw, thumbs) => {
                     let m = metrics(l);
                     let bw = m.widthIncludingTrailingWhitespace + 30.0;
-                    let r = rect(x0 + width - bw, y, x0 + width, y + h);
-                    msgs.push((r, raw.clone()));
-                    rt.FillRoundedRectangle(&rrect(r, 12.0), &b(C_BUBBLE)?);
-                    rt.DrawTextLayout(windows_numerics::Vector2 { X: r.left + 15.0, Y: y + 11.0 }, l, &white, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    let text_h = if raw.trim().is_empty() { 0.0 } else { m.height + 22.0 };
+                    let r = rect(x0 + width - bw, y, x0 + width, y + text_h);
+                    msgs.push((rect(r.left, y, r.right, y + h), raw.clone()));
+                    if text_h > 0.0 {
+                        rt.FillRoundedRectangle(&rrect(r, 12.0), &b(C_BUBBLE)?);
+                        rt.DrawTextLayout(windows_numerics::Vector2 { X: r.left + 15.0, Y: y + 11.0 }, l, &white, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    }
+                    // pictures: right-aligned in a row under the bubble, rounded corners
+                    let mut px = x0 + width;
+                    let py = y + if text_h > 0.0 { text_h + 8.0 } else { 0.0 };
+                    for (bm, tw, th) in thumbs.iter().rev() {
+                        let pr = rect(px - tw, py, px, py + th);
+                        let layer = rt.CreateLayer(None)?;
+                        let geo: ID2D1Factory = rt.GetFactory()?;
+                        let rr = geo.CreateRoundedRectangleGeometry(&rrect(pr, 8.0))?;
+                        let params = D2D1_LAYER_PARAMETERS { contentBounds: pr, geometricMask: std::mem::ManuallyDrop::new(Some(rr.into())), maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, maskTransform: windows_numerics::Matrix3x2::identity(), opacity: 1.0, opacityBrush: std::mem::ManuallyDrop::new(None), layerOptions: D2D1_LAYER_OPTIONS_NONE };
+                        rt.PushLayer(&params, &layer);
+                        rt.DrawBitmap(bm, Some(&pr), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                        rt.PopLayer();
+                        px -= tw + 8.0;
+                    }
                 }
                 Item::Text(parts, raw) => {
                     msgs.push((rect(x0, y, x0 + width, y + h), raw.clone()));
@@ -3357,6 +3439,14 @@ mod tests {
         std::fs::write(d.join("a b.txt"), "").unwrap();
         assert_eq!(super::mention_list(&d, 10), vec!["src/", "src/main.rs", "a b.txt"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn base64_round_trip() {
+        for data in [&b""[..], b"a", b"ab", b"abc", b"abcd", &(0u8..=255).collect::<Vec<_>>()] {
+            assert_eq!(super::unbase64(&super::base64(data)).unwrap(), data);
+        }
+        assert!(super::unbase64("ab$c").is_none());
     }
 
     #[test]
